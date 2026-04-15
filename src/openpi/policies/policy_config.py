@@ -35,7 +35,7 @@ def create_trained_policy(
     sample_kwargs: dict[str, Any] | None = None,
     default_prompt: str | None = None,
     norm_stats: dict[str, transforms.NormStats] | None = None,
-) -> _policy.Policy | _policy.ReasoningPolicy:
+) -> _policy.Policy | _policy.ReasoningPolicy | _policy.FASTReasoningPolicy:
     """Create a policy from a trained checkpoint.
 
     Args:
@@ -81,6 +81,11 @@ def create_trained_policy(
             extra_policy_kwargs['initial_scene_plan'] = ''
         else:
             extra_policy_kwargs['initial_scene_plan'] = ''
+    elif train_config.model.model_type == _model.ModelType.PI0_FAST_FUSE:
+        ploicy_cls = _policy.FASTReasoningPolicy
+        if isinstance(train_config, _config.UMITrainConfig):
+            extra_policy_kwargs['use_ref_img'] = train_config.use_reference_image
+        extra_policy_kwargs['initial_scene_plan'] = ''
     else:
         ploicy_cls = _policy.Policy
 

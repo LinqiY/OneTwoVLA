@@ -82,8 +82,15 @@ class FakeDataset(Dataset):
         return self._num_samples
 
 
-def create_dataset(data_config: _config.DataConfig, model_config: _model.BaseModelConfig) -> tuple[Dataset, Dataset | None]:
-    """Create datasets for training. If  `data_config.use_val_dataset`, will also return a validation dataset."""
+def create_dataset(
+    data_config: _config.DataConfig,
+    model_config: _model.BaseModelConfig,
+    *,
+    use_val_dataset: bool = False,
+    val_ratio: float = 0.05,
+    seed: int = 42,
+) -> tuple[Dataset, Dataset | None]:
+    """Create datasets for training. UMI uses episode-based split; LeRobot uses random frame split when use_val_dataset."""
     repo_id = data_config.repo_id
     if repo_id is None:
         raise ValueError("Repo ID is not set. Cannot create dataset.")
@@ -91,7 +98,7 @@ def create_dataset(data_config: _config.DataConfig, model_config: _model.BaseMod
         return FakeDataset(model_config, num_samples=1024)
 
     dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(repo_id, local_files_only=data_config.local_files_only)
-    
+
     val_dataset = None
     if isinstance(data_config, _config.UMIDataConfig):
         dataset = umi_dataset.UMIDataset(data_config, model_config.action_horizon)
@@ -111,6 +118,17 @@ def create_dataset(data_config: _config.DataConfig, model_config: _model.BaseMod
         dataset = TransformedDataset(dataset, [_transforms.PromptFromLeRobotTask(dataset_meta.tasks)])
         if val_dataset is not None:
             val_dataset = TransformedDataset(val_dataset, [_transforms.PromptFromLeRobotTask(dataset_meta.tasks)])
+
+    if use_val_dataset and val_dataset is None and not isinstance(data_config, _config.UMIDataConfig):
+        n = len(dataset)
+        if n > 1:
+            n_val = min(max(1, int(n * val_ratio)), n - 1)
+            rng = np.random.RandomState(seed)
+            perm = rng.permutation(n)
+            val_indices = perm[:n_val].tolist()
+            train_indices = perm[n_val:].tolist()
+            val_dataset = torch.utils.data.Subset(dataset, val_indices)
+            dataset = torch.utils.data.Subset(dataset, train_indices)
 
     return dataset, val_dataset
 
@@ -163,7 +181,13 @@ def create_data_loader(
     """
     data_config = config.data.create(config.assets_dirs, config.model)
 
-    dataset, val_dataset = create_dataset(data_config, config.model)
+    dataset, val_dataset = create_dataset(
+        data_config,
+        config.model,
+        use_val_dataset=config.use_val_dataset,
+        val_ratio=config.val_ratio,
+        seed=config.seed,
+    )
     dataset = transform_dataset(dataset, data_config, skip_norm_stats=skip_norm_stats)
 
     data_loader = TorchDataLoader(
@@ -192,16 +216,25 @@ def create_data_loader(
         val_data_loader = None
 
     class DataLoaderImpl(DataLoader):
-        def __init__(self, data_config: _config.DataConfig, data_loader: TorchDataLoader):
+        def __init__(
+            self,
+            data_config: _config.DataConfig,
+            data_loader: TorchDataLoader,
+            model_config: _model.BaseModelConfig,
+        ):
             self._data_config = data_config
             self._data_loader = data_loader
+            self._model_config = model_config
 
         def data_config(self) -> _config.DataConfig:
             return self._data_config
 
         def __iter__(self):
             for batch in self._data_loader:
-                if hasattr(self._data_config, 'use_reasoning') and self._data_config.use_reasoning:
+                use_fuse_obs = (
+                    hasattr(self._data_config, "use_reasoning") and self._data_config.use_reasoning
+                ) or self._model_config.model_type in (_model.ModelType.PI0_FUSE, _model.ModelType.PI0_FAST_FUSE)
+                if use_fuse_obs:
                     yield _model.FuseObservation.from_dict(batch), batch["actions"]
                 else:
                     yield _model.Observation.from_dict(batch), batch["actions"]
@@ -209,9 +242,115 @@ def create_data_loader(
         def __len__(self) -> int:
             return len(self._data_loader)
 
-    return DataLoaderImpl(data_config, data_loader), \
-        DataLoaderImpl(data_config, val_data_loader) if val_data_loader else None
+    return DataLoaderImpl(data_config, data_loader, config.model), \
+        DataLoaderImpl(data_config, val_data_loader, config.model) if val_data_loader else None
 
+def create_vl_data_loader(
+    config: _config.TrainConfig,
+    *,
+    sharding: jax.sharding.Sharding | None = None,
+    skip_norm_stats: bool = False,
+    shuffle: bool = False,
+    num_batches: int | None = None,
+    num_workers: int = 0,
+) -> DataLoader[tuple[_model.Observation, _model.Actions]]:
+    """Create a VL/VQA data loader for co-training."""
+    from openpi.policies.vl_dataset import ShareRobotVQADataset
+
+    vl_data_config = config.vl_data.create(config.assets_dirs, config.model)
+
+    if not vl_data_config.vl_groups:
+        raise ValueError("VLDataConfig.vl_groups is empty after create(); check vl_data factory settings.")
+
+    per_group_ds = [
+        ShareRobotVQADataset(json_paths=g.json_paths, image_root=g.image_root) for g in vl_data_config.vl_groups
+    ]
+    for d, g in zip(per_group_ds, vl_data_config.vl_groups, strict=True):
+        if len(d) == 0:
+            raise ValueError(f"VL group has no samples after loading JSON paths (first paths): {g.json_paths[:3]}")
+
+    if len(per_group_ds) == 1:
+        raw_vl = per_group_ds[0]
+    else:
+        raw_vl = torch.utils.data.ConcatDataset(per_group_ds)
+
+    dataset = transform_dataset(raw_vl, vl_data_config, skip_norm_stats=skip_norm_stats)
+
+    use_shuffle = shuffle and vl_data_config.vl_shuffle
+    sampler: torch.utils.data.Sampler | None = None
+    if len(per_group_ds) > 1 and use_shuffle:
+        lengths = [len(d) for d in per_group_ds]
+        probs = np.array([g.interleave_prob for g in vl_data_config.vl_groups], dtype=np.float64)
+        if np.any(probs < 0):
+            raise ValueError("interleave_prob must be non-negative for every VL group.")
+        psum = float(np.sum(probs))
+        if psum <= 0:
+            raise ValueError("Sum of interleave_prob over VL groups must be > 0.")
+        probs = probs / psum
+        weights: list[float] = []
+        for n_i, p_i in zip(lengths, probs, strict=True):
+            w = float(p_i) / float(n_i)
+            weights.extend([w] * n_i)
+        wgen = torch.Generator()
+        wgen.manual_seed(int(config.seed))
+        sampler = torch.utils.data.WeightedRandomSampler(
+            weights=torch.as_tensor(weights, dtype=torch.double),
+            num_samples=len(weights),
+            replacement=True,
+            generator=wgen,
+        )
+        use_shuffle = False
+
+    global_vl_batch_size = max(1, round(config.batch_size * config.cotrain_ratio))
+    num_devices = jax.device_count()
+
+    if global_vl_batch_size < num_devices:
+        raise ValueError(
+            f"VL global batch size ({global_vl_batch_size}) is smaller than device count ({num_devices}). "
+            f"Current batch_size={config.batch_size}, cotrain_ratio={config.cotrain_ratio}. "
+            "Increase batch_size or cotrain_ratio."
+        )
+    if global_vl_batch_size % num_devices != 0:
+        raise ValueError(
+            f"VL global batch size ({global_vl_batch_size}) must be divisible by device count ({num_devices}). "
+            f"Current batch_size={config.batch_size}, cotrain_ratio={config.cotrain_ratio}."
+        )
+
+    local_vl_batch_size = global_vl_batch_size // jax.process_count()
+
+    vl_loader = TorchDataLoader(
+        dataset,
+        local_batch_size=local_vl_batch_size,
+        sharding=sharding,
+        shuffle=use_shuffle,
+        sampler=sampler,
+        num_batches=num_batches,
+        num_workers=num_workers,
+        seed=config.seed,
+    )
+
+    class DataLoaderImpl(DataLoader):
+        def __init__(
+            self,
+            data_config: _config.DataConfig,
+            data_loader: TorchDataLoader,
+            model_config: _model.BaseModelConfig,
+        ):
+            self._data_config = data_config
+            self._data_loader = data_loader
+            self._model_config = model_config
+
+        def data_config(self) -> _config.DataConfig:
+            return self._data_config
+
+        def __iter__(self):
+            for batch in self._data_loader:
+                yield _model.Observation.from_dict(batch), batch["actions"]
+
+        def __len__(self) -> int:
+            return len(self._data_loader)
+
+    return DataLoaderImpl(vl_data_config, vl_loader, config.model)
 
 class TorchDataLoader:
     def __init__(
@@ -221,6 +360,7 @@ class TorchDataLoader:
         *,
         sharding: jax.sharding.Sharding | None = None,
         shuffle: bool = False,
+        sampler: torch.utils.data.Sampler | None = None,
         num_batches: int | None = None,
         num_workers: int = 0,
         iterate_indefinitely: bool = True,
@@ -232,7 +372,8 @@ class TorchDataLoader:
             dataset: The dataset to load.
             local_batch_size: The local batch size for each process.
             sharding: The sharding to use for the data loader.
-            shuffle: Whether to shuffle the data.
+            shuffle: Whether to shuffle the data (ignored if `sampler` is set).
+            sampler: Optional sampler (e.g. weighted interleave across concatenated VL pools).
             num_batches: If provided, determines the number of returned batches. If the
                 number is larger than the number of batches in the dataset, the data loader
                 will loop over the dataset. If not provided, will iterate over the dataset
@@ -247,6 +388,9 @@ class TorchDataLoader:
 
         if len(dataset) < local_batch_size:
             raise ValueError(f"Local batch size ({local_batch_size}) is larger than the dataset size ({len(dataset)}).")
+
+        if sampler is not None and shuffle:
+            raise ValueError("Cannot use `shuffle=True` together with a custom `sampler`.")
 
         if sharding is None:
             # Use data parallel sharding by default.
@@ -267,7 +411,8 @@ class TorchDataLoader:
         self._data_loader = torch.utils.data.DataLoader(
             typing.cast(torch.utils.data.Dataset, dataset),
             batch_size=local_batch_size,
-            shuffle=shuffle,
+            shuffle=shuffle if sampler is None else False,
+            sampler=sampler,
             num_workers=num_workers,
             multiprocessing_context=mp_context,
             persistent_workers=num_workers > 0,

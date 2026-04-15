@@ -29,6 +29,7 @@ class ModelType(enum.Enum):
     PI0 = "pi0"
     PI0_FAST = "pi0_fast"
     PI0_FUSE = "pi0_fuse"
+    PI0_FAST_FUSE = "pi0_fast_fuse"
 
 
 # The model always expects these images

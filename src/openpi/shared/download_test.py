@@ -45,7 +45,8 @@ def test_download_s3():
 
 
 def test_download_fsspec():
-    remote_path = "gs://big_vision/paligemma_tokenizer.model"
+    # remote_path = "gs://big_vision/paligemma_tokenizer.model"
+    remote_path = "/inspire/hdd/project/embodied-multimodality/public/syfei/openpi/ckpt/paligemma_tokenizer.model"
 
     local_path = download.maybe_download(remote_path, gs={"token": "anon"})
     assert local_path.exists()

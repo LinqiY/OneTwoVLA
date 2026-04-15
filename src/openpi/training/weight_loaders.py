@@ -54,22 +54,26 @@ class CheckpointWeightLoader(WeightLoader):
         return _merge_params(loaded_params, params, missing_regex=".*lora.*")
 
 
+_DEFAULT_PALIGEMMA_NPZ = "gs://vertex-model-garden-paligemma-us/paligemma/pt_224.npz"
+
+
 @dataclasses.dataclass(frozen=True)
 class PaliGemmaWeightLoader(WeightLoader):
-    """Loads weights from the official PaliGemma checkpoint.
+    """Loads weights from the official PaliGemma checkpoint (.npz).
 
-    This will overwrite existing weights with similar names while keeping all extra weights intact.
-    This allows us to support the action expert which is used by the Pi0 model.
+    Overwrites matching weights while keeping the action expert (and other extras) from initialization.
     """
 
+    npz_path: str = _DEFAULT_PALIGEMMA_NPZ
+
     def load(self, params: at.Params) -> at.Params:
-        path = download.maybe_download(
-            "gs://vertex-model-garden-paligemma-us/paligemma/pt_224.npz", gs={"token": "anon"}
-        )
+        download_kwargs: dict = {}
+        if self.npz_path.startswith("gs://"):
+            download_kwargs["gs"] = {"token": "anon"}
+        path = download.maybe_download(self.npz_path, **download_kwargs)
         with path.open("rb") as f:
             flat_params = dict(np.load(f, allow_pickle=False))
         loaded_params = {"PaliGemma": flax.traverse_util.unflatten_dict(flat_params, sep="/")["params"]}
-        # Add all missing weights.
         return _merge_params(loaded_params, params, missing_regex=".*")
 
 

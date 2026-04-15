@@ -18,11 +18,13 @@ import openpi.models.model as _model
 import openpi.models.pi0 as pi0
 import openpi.models.pi0_fuse as pi0_fuse
 import openpi.models.pi0_fast as pi0_fast
+import openpi.models.pi0_fast_fuse as pi0_fast_fuse
 import openpi.models.tokenizer as _tokenizer
 import openpi.policies.aloha_policy as aloha_policy
 import openpi.policies.droid_policy as droid_policy
 import openpi.policies.libero_policy as libero_policy
 import openpi.policies.umi_policy as umi_policy
+import openpi.policies.vlabench_policy as vlabench_policy
 import openpi.shared.download as _download
 import openpi.shared.normalize as _normalize
 import openpi.training.optimizer as _optimizer
@@ -103,7 +105,7 @@ class DataConfig:
         """
         new_inputs = copy.deepcopy(self.model_transforms.inputs)
         for i in range(len(new_inputs)):
-            if isinstance(new_inputs[i], _transforms.TokenizeFASTInputs):
+            if isinstance(new_inputs[i], (_transforms.TokenizeFASTInputs, _transforms.FuseTokenizeFASTInputs)):
                 new_inputs[i] = dataclasses.replace(new_inputs[i], validation=True)
         new_model_transforms = dataclasses.replace(self.model_transforms, inputs=new_inputs)
         return dataclasses.replace(self, model_transforms=new_model_transforms)
@@ -126,6 +128,8 @@ class UMIDataConfig(DataConfig):
     is_computing_norm_stats: bool = False
     reasoning_json_path: str | None = None
     use_outdated_reasoning: bool = True
+    # skip reasoning on robot episodes and output action directly
+    direct_action_on_robot: bool = False
 
 class GroupFactory(Protocol):
     def __call__(self, model_config: _model.BaseModelConfig) -> _transforms.Group:
@@ -182,6 +186,26 @@ class ModelTransformFactory(GroupFactory):
                             _tokenizer.FusePaligemmaTokenizer(model_config.max_token_len),
                         ),
                     ]
+                )
+            case _model.ModelType.PI0_FAST_FUSE:
+                return _transforms.Group(
+                    inputs=[
+                        _transforms.InjectDefaultPrompt(self.default_prompt),
+                        _transforms.ResizeImages(224, 224),
+                        _transforms.FuseTokenizeFASTInputs(
+                            _tokenizer.FuseFASTTokenizer(model_config.max_token_len),
+                        ),
+                    ],
+                    outputs=[
+                        _transforms.ExtractFASTFuseActions(
+                            _tokenizer.FuseFASTTokenizer(model_config.max_token_len),
+                            action_horizon=model_config.action_horizon,
+                            action_dim=model_config.action_dim,
+                        ),
+                        _transforms.ExtractFASTFuseThoughts(
+                            _tokenizer.FuseFASTTokenizer(model_config.max_token_len),
+                        ),
+                    ],
                 )
 
 
@@ -411,6 +435,212 @@ class LeRobotUMIDataConfig(DataConfigFactory):
         return None
 
 @dataclasses.dataclass(frozen=True)
+class LeRobotVLABenchDataConfig(DataConfigFactory):
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        # Make inputs look like they come from the Libero environment
+        repack_transform = _transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(
+                    {
+                        "observation/image": "image",
+                        "observation/second_image": "second_image",
+                        "observation/wrist_image": "wrist_image",
+                        "observation/state": "state",
+                        "actions": "actions",
+                        "prompt": "prompt",
+                    }
+                )
+            ]
+        )
+
+        # Prepare data for policy training
+        # Convert images to uint8 numpy arrays, add masks
+        data_transforms = _transforms.Group(
+            inputs=[vlabench_policy.VLABenchInputs(action_dim=model_config.action_dim, model_type=model_config.model_type)],
+            outputs=[vlabench_policy.VLABenchOutputs()],
+        )
+        # Use delta actions (not for gripper)
+        delta_action_mask = _transforms.make_bool_mask(6, -1)
+        data_transforms = data_transforms.push(
+            inputs=[_transforms.DeltaActions(delta_action_mask)],
+            outputs=[_transforms.AbsoluteActions(delta_action_mask)],
+        )
+
+        # Model transforms include things like tokenizing the prompt and action targets
+        model_transforms = ModelTransformFactory()(model_config)
+
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs),
+            repack_transforms=repack_transform,
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+        )
+        
+@dataclasses.dataclass(frozen=True)
+class AlignedLeRobotVLABenchDataConfig(DataConfigFactory):
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        # Make inputs look like they come from the Libero environment
+        repack_transform = _transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(
+                    {
+                        "observation/image": "image",
+                        "observation/second_image": "second_image",
+                        "observation/wrist_image": "wrist_image",
+                        "observation/state": "state",
+                        "actions": "actions",
+                        "prompt": "prompt",
+                    }
+                )
+            ]
+        )
+
+        # Prepare data for policy training
+        # Convert images to uint8 numpy arrays, add masks
+        data_transforms = _transforms.Group(
+            inputs=[vlabench_policy.VLABenchInputs(action_dim=model_config.action_dim, model_type=model_config.model_type)],
+            outputs=[vlabench_policy.VLABenchOutputs()],
+        )
+        # Use delta actions (not for gripper)
+        delta_action_mask = _transforms.make_bool_mask(6, -1)
+        data_transforms = data_transforms.push(
+            inputs=[_transforms.RLDSDeltaActions(delta_action_mask)],
+            outputs=[_transforms.RLDSAbsoluteActions(delta_action_mask)],
+        )
+
+        # Model transforms include things like tokenizing the prompt and action targets
+        model_transforms = ModelTransformFactory()(model_config)
+
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs),
+            repack_transforms=repack_transform,
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+        )
+
+@dataclasses.dataclass(frozen=True)
+class VLGroupConfig:
+    """One VL pool after path resolution: merged JSON list + sampling weight vs other pools."""
+
+    json_paths: tuple[str, ...]
+    image_root: str | None
+    interleave_prob: float = 1.0
+
+
+@dataclasses.dataclass(frozen=True)
+class VLDataConfig(DataConfig):
+    vl_json_path: str = tyro.MISSING
+    vl_image_root: str = tyro.MISSING
+    vl_groups: tuple[VLGroupConfig, ...] = ()
+    vl_shuffle: bool = True
+
+
+@dataclasses.dataclass(frozen=True)
+class VLVQADatasetSource:
+    """One VL dataset entry: `path` is a JSON file or a directory of `*.json` files (merged as one pool)."""
+
+    path: str
+    image_root: str | None = None
+    interleave_prob: float = 1.0
+
+
+@dataclasses.dataclass(frozen=True)
+class VLVQADataConfig(DataConfigFactory):
+    """
+    DataConfigFactory for VL/VQA co-training data.
+
+    Notes:
+    - This is not a LeRobot dataset.
+    - We still keep a non-None repo_id / asset_id so norm stats loading can work normally.
+    - Norm stats should usually reuse the robot/VLABench asset stats.
+    - Either set legacy `vl_json_path` + `vl_image_root`, or set non-empty `vl_sources` (then
+      `vl_json_path` is optional for Tyro / CLI). Directory `path` expands to all `*.json` in that
+      folder, concatenated as one pool.
+    """
+    repo_id: str = "vl_vqa"
+    vl_json_path: str | None = None
+    vl_image_root: str = tyro.MISSING
+    vl_sources: tuple[VLVQADatasetSource, ...] = ()
+    vl_shuffle: bool = True
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> VLDataConfig:
+        from openpi.policies.vl_dataset import expand_vl_path_to_json_files
+
+        base = self.create_base_config(assets_dirs)
+
+        default_root = None if self.vl_image_root is tyro.MISSING else self.vl_image_root
+
+        if self.vl_sources:
+            groups: list[VLGroupConfig] = []
+            for src in self.vl_sources:
+                json_paths = tuple(expand_vl_path_to_json_files(src.path))
+                img_root = src.image_root if src.image_root is not None else default_root
+                if img_root is None:
+                    raise ValueError(
+                        "Each VL source needs an `image_root` or set factory `vl_image_root` as default."
+                    )
+                if src.interleave_prob < 0:
+                    raise ValueError(f"interleave_prob must be >= 0, got {src.interleave_prob}")
+                groups.append(
+                    VLGroupConfig(
+                        json_paths=json_paths,
+                        image_root=img_root,
+                        interleave_prob=src.interleave_prob,
+                    )
+                )
+            if sum(g.interleave_prob for g in groups) <= 0:
+                raise ValueError("Sum of `interleave_prob` over `vl_sources` must be > 0.")
+            vl_groups = tuple(groups)
+            vl_json_path = vl_groups[0].json_paths[0]
+            vl_image_root = vl_groups[0].image_root
+        else:
+            if not self.vl_json_path:
+                raise ValueError("Set `vl_json_path`/`vl_image_root` or non-empty `vl_sources`.")
+            if self.vl_image_root is tyro.MISSING:
+                raise ValueError("`vl_image_root` is required when `vl_sources` is empty.")
+            json_paths = tuple(expand_vl_path_to_json_files(self.vl_json_path))
+            vl_groups = (VLGroupConfig(json_paths=json_paths, image_root=default_root, interleave_prob=1.0),)
+            vl_json_path = json_paths[0]
+            vl_image_root = default_root
+
+        return VLDataConfig(
+            repo_id=base.repo_id,
+            asset_id=base.asset_id,
+            norm_stats=base.norm_stats,
+            repack_transforms=_transforms.Group(),
+            data_transforms=_transforms.Group(
+                inputs=[
+                    _transforms.VQAInputs(
+                        model_state_dim=model_config.action_dim,
+                        action_horizon=model_config.action_horizon,
+                        action_dim=model_config.action_dim,
+                    ),
+                ],
+                outputs=[],
+            ),
+            model_transforms=_transforms.Group(
+                inputs=[
+                    _transforms.ResizeImages(224, 224),
+                    _transforms.TokenizeFASTVQAInputs(
+                        _tokenizer.FASTTokenizer(model_config.max_token_len),
+                    ),
+                ],
+                outputs=[],
+            ),
+            use_quantile_norm=model_config.model_type == ModelType.PI0_FAST,
+            action_sequence_keys=("actions",),
+            prompt_from_task=False,
+            local_files_only=True,
+            vl_json_path=vl_json_path,
+            vl_image_root=vl_image_root,
+            vl_groups=vl_groups,
+            vl_shuffle=self.vl_shuffle,
+        )
+
+@dataclasses.dataclass(frozen=True)
 class TrainConfig:
     # Name of the config. Must be unique. Will be used to reference this config.
     name: tyro.conf.Suppress[str]
@@ -457,9 +687,9 @@ class TrainConfig:
     # How often (in steps) to log training metrics.
     log_interval: int = 100
     # How often (in steps) to save checkpoints.
-    save_interval: int = 5000
+    save_interval: int = 1000
     # If set, any existing checkpoints matching step % keep_period == 0 will not be deleted.
-    keep_period: int | None = 10_000
+    keep_period: int | None = 5_000
     # How often (in steps) to evaluate the model. Only used if use_val_dataset is True.
     val_interval: int = 5000
 
@@ -479,6 +709,8 @@ class TrainConfig:
     val_ratio: float = 0.05
     # If true, will create a train/val split from the dataset. It's used only when compute norm stats.
     create_train_val_split: bool = False
+    # UMI datasets only; accepted on CLI for parity with UMITrainConfig, ignored for LeRobot.
+    is_computing_norm_stats: bool = False
 
     # If the value is greater than 1, FSDP will be enabled and shard across number of specified devices; overall
     # device memory will be reduced but training could potentially be slower.
@@ -507,6 +739,18 @@ class TrainConfig:
         if self.resume and self.overwrite:
             raise ValueError("Cannot resume and overwrite at the same time.")
 
+@dataclasses.dataclass(frozen=True)
+class CotrainConfig(TrainConfig):
+    """
+    Training config with an additional VL/VQA co-training branch.
+
+    Important:
+    - cotrain_ratio is the VL batch-size ratio relative to the VLA global batch size.
+    - It is NOT a loss weight.
+    - It is NOT an update-frequency ratio.
+    """
+    cotrain_ratio: float = 0.25
+    vl_data: VLVQADataConfig = dataclasses.field(default_factory=VLVQADataConfig)
 
 @dataclasses.dataclass(frozen=True)
 class UMITrainConfig(TrainConfig):
@@ -524,7 +768,6 @@ class UMITrainConfig(TrainConfig):
     use_reference_image: bool = True
     # whether to use outdated reasoning
     use_outdated_reasoning: bool = True
-    is_computing_norm_stats: bool = False
     data: DataConfigFactory = dataclasses.field(init=False)
     reasoning_json_path: str | None = None
     prompt_from_task: bool = True
@@ -688,6 +931,180 @@ _CONFIGS = [
         getitem_type="necessary",
         use_val_dataset=True,
         use_outdated_reasoning=True,
+    ),
+    # VLABench Config
+    TrainConfig(
+        name="pi0_vlabench_posttrain_primitive",
+        model=pi0.Pi0Config(paligemma_variant="gemma_2b"),
+        data=LeRobotVLABenchDataConfig(
+            repo_id="vlabench/vlabench_pretrain_primitive",
+            base_config=DataConfig(
+                prompt_from_task=True,
+                local_files_only=True,
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("/inspire/hdd/global_user/gongjingjing-25039/sdzhang/model/openpi/openpi-assets/checkpoints/pi0_base/params"),
+        # num_train_steps=30_000,
+        use_val_dataset=False,
+        # val_ratio=0.05,
+        num_train_steps=100_000,
+        batch_size=32,
+        num_workers=64,
+    ),
+    # pi0 only action
+    TrainConfig(
+        name="pi0_vlabench_pretrain_primitive",
+        model=pi0.Pi0Config(paligemma_variant="gemma_2b"),
+        data=LeRobotVLABenchDataConfig(
+            repo_id="vlabench/vlabench_pretrain_primitive",
+            base_config=DataConfig(
+                prompt_from_task=True,
+                local_files_only=True,
+            ),
+        ),
+        weight_loader=weight_loaders.PaliGemmaWeightLoader("/inspire/hdd/global_user/gongjingjing-25039/lqyin/models/paligemma-3b-pt-224-jax/paligemma-3b-pt-224.npz"),
+        # num_train_steps=30_000,
+        use_val_dataset=False,
+        # val_ratio=0.05,
+        num_train_steps=30_000,
+        batch_size=32,
+        num_workers=64,
+    ),
+    TrainConfig(
+        name="onetwovla_vlabench_direct",
+        model=pi0_fuse.Pi0FuseConfig(action_horizon=16, max_token_len=60),
+        data=LeRobotVLABenchDataConfig(
+            repo_id="vlabench",
+            base_config=DataConfig(
+                prompt_from_task=True,
+                local_files_only=True,
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("/inspire/hdd/global_user/gongjingjing-25039/sdzhang/model/openpi/openpi-assets/checkpoints/pi0_base/params"),
+        num_train_steps=30_000,
+        use_val_dataset=True,
+        # val_ratio=0.05,
+    ),
+    # pifast
+    TrainConfig(
+        name="pifast_vlabench_pretrain_primitive",
+        model=pi0_fast.Pi0FASTConfig(action_dim=7, action_horizon=10, max_token_len=180, paligemma_variant="gemma_2b"),
+        data=LeRobotVLABenchDataConfig(
+            repo_id="vlabench/vlabench_pretrain_primitive",
+            base_config=DataConfig(
+                prompt_from_task=True,
+                local_files_only=True,
+            ),
+        ),
+        weight_loader=weight_loaders.PaliGemmaWeightLoader("/inspire/hdd/global_user/gongjingjing-25039/lqyin/models/paligemma-3b-pt-224-jax/paligemma-3b-pt-224.npz"),
+        use_val_dataset=False,
+        # val_ratio=0.05,
+        num_train_steps=30_000,
+        batch_size=32,
+        num_workers=64,
+    ),
+    # pifast fuse only action
+    TrainConfig(
+        name="pi0_fast_fuse_vlabench_pretrain_primitive",
+        model=pi0_fast_fuse.Pi0FASTFuseConfig(action_dim=7, action_horizon=10, max_token_len=180, paligemma_variant="gemma_2b"),
+        data=LeRobotVLABenchDataConfig(
+            repo_id="vlabench",
+            base_config=DataConfig(
+                prompt_from_task=True,
+                local_files_only=True,
+            ),
+        ),
+        weight_loader=weight_loaders.PaliGemmaWeightLoader("/inspire/hdd/global_user/gongjingjing-25039/lqyin/models/paligemma-3b-pt-224-jax/paligemma-3b-pt-224.npz"),
+        num_train_steps=30_000,
+        use_val_dataset=False,
+        batch_size=32,
+        num_workers=64,        
+    ),
+    CotrainConfig(
+        name="pifast_vlabench_cotrain",
+        model=pi0_fast.Pi0FASTConfig(
+            action_dim=7,
+            action_horizon=10,
+            max_token_len=256,
+            paligemma_variant="gemma_2b",
+        ),
+        data=LeRobotVLABenchDataConfig(
+            repo_id="vlabench/vlabench_pretrain_primitive",
+            base_config=DataConfig(
+                prompt_from_task=True,
+                local_files_only=True,
+            ),
+        ),
+        vl_data=VLVQADataConfig(
+            # 关键：复用 VLABench 的 norm stats，而不是默认去找 vl_vqa 的 assets
+            assets=AssetsConfig(asset_id="vlabench/vlabench_pretrain_primitive"),
+            vl_json_path="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/dataset/vl_dataset/vlabench_vqa_assets/primitive/jsons_train/task_planning/action_understanding_cot_train.json",
+            vl_image_root="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/dataset/vl_dataset/vlabench_vqa_assets/primitive",
+            base_config=DataConfig(
+                local_files_only=True,
+            ),
+        ),
+        cotrain_ratio=0.25,
+        weight_loader=weight_loaders.PaliGemmaWeightLoader(
+            "/inspire/hdd/global_user/gongjingjing-25039/lqyin/models/paligemma-3b-pt-224-jax/paligemma-3b-pt-224.npz"
+        ),
+        use_val_dataset=False,
+        num_train_steps=30_000,
+        batch_size=32,
+        num_workers=64,
+    ),
+    CotrainConfig(
+        name="pifast_vlabench_cotrain_eb",
+        model=pi0_fast.Pi0FASTConfig(
+            action_dim=7,
+            action_horizon=10,
+            max_token_len=320,
+            paligemma_variant="gemma_2b",
+        ),
+        data=LeRobotVLABenchDataConfig(
+            repo_id="vlabench/vlabench_pretrain_primitive",
+            base_config=DataConfig(
+                prompt_from_task=True,
+                local_files_only=True,
+            ),
+        ),
+        vl_data=VLVQADataConfig(
+            assets=AssetsConfig(asset_id="vlabench/vlabench_pretrain_primitive"),
+            vl_image_root="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/dataset/vl_dataset/vlabench_vqa_assets/primitive",
+            vl_sources=(
+                VLVQADatasetSource(
+                    path="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/dataset/vl_dataset/vlabench_vqa_assets/primitive/jsons_train/affordance",
+                    interleave_prob=0.22,
+                ),
+                VLVQADatasetSource(
+                    path="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/dataset/vl_dataset/vlabench_vqa_assets/primitive/jsons_train/goal_description",
+                    interleave_prob=0.14,
+                ),
+                VLVQADatasetSource(
+                    path="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/dataset/vl_dataset/vlabench_vqa_assets/primitive/jsons_train/spatial_understanding",
+                    interleave_prob=0.24,
+                ),
+                VLVQADatasetSource(
+                    path="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/dataset/vl_dataset/vlabench_vqa_assets/primitive/jsons_train/task_planning",
+                    interleave_prob=0.14,
+                ),
+                VLVQADatasetSource(
+                    path="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/dataset/vl_dataset/vlabench_vqa_assets/primitive/jsons_train/trajectory",
+                    interleave_prob=0.26,
+                ),
+            ),
+            base_config=DataConfig(
+                local_files_only=True,
+            ),
+        ),
+        cotrain_ratio=0.25,
+        weight_loader=weight_loaders.PaliGemmaWeightLoader(
+            "/inspire/hdd/global_user/gongjingjing-25039/lqyin/models/paligemma-3b-pt-224-jax/paligemma-3b-pt-224.npz"
+        ),
+        use_val_dataset=False,
+        num_train_steps=30_000,
+        batch_size=32,
+        num_workers=64,
     ),
     UMITrainConfig(
         name="pi0_visual_grounding",

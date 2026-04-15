@@ -59,13 +59,19 @@ dev = [
 
 [tool.uv.sources]
 openpi-client = { workspace = true }
-lerobot = { git = "https://github.com/huggingface/lerobot", rev = "6674e368249472c91382eb54bb8501c94c7f0c56" }
+lerobot = { path = "/root/.cache/uv/git-v0/checkouts/b2400a7a62d6a7cf/6674e36" }
 
 [tool.uv.workspace]
 members = ["packages/*"]
 
+[tool.uv]
+environments = [
+  "sys_platform == 'linux' and platform_machine == 'x86_64' and python_full_version < '3.12'"
+]
+
 [[tool.uv.index]]
-url = "https://pypi.tuna.tsinghua.edu.cn/simple"
+url = "https://mirrors.aliyun.com/pypi/simple/"
+default = true
 
 [tool.ruff]
 line-length = 120

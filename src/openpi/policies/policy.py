@@ -21,6 +21,7 @@ from typing_extensions import override
 from openpi import transforms as _transforms
 from openpi.models import model as _model
 from openpi.models.pi0_fuse import Pi0Fuse
+from openpi.models.pi0_fast_fuse import Pi0FASTFuse
 from openpi.shared import array_typing as at
 from openpi.shared import nnx_utils
 
@@ -330,6 +331,196 @@ class ReasoningPolicy(BasePolicy):
         with self._lock:
             return self._is_thinking
     
+    @is_thinking.setter
+    def is_thinking(self, value: bool):
+        with self._lock:
+            self._is_thinking = value
+
+    @property
+    def metadata(self) -> dict[str, Any]:
+        return self._metadata
+
+
+class FASTReasoningPolicy(BasePolicy):
+    """Reasoning policy for Pi0FASTFuse: both reasoning and action are autoregressive token decoding."""
+
+    def __init__(
+        self,
+        model: Pi0FASTFuse,
+        *,
+        rng: at.KeyArrayLike | None = None,
+        transforms: Sequence[_transforms.DataTransformFn] = (),
+        output_transforms: Sequence[_transforms.DataTransformFn] = (),
+        sample_kwargs: dict[str, Any] | None = None,
+        metadata: dict[str, Any] | None = None,
+        use_ref_img: bool = False,
+        initial_scene_plan: str = '',
+    ):
+        self._prefill = nnx_utils.module_jit(model.prefill, static_argnames=('temperature',))
+        self._act = nnx_utils.module_jit(model.act)
+        self._reason = nnx_utils.module_jit(model.reason, static_argnames=('temperature',))
+        self._input_transform = _transforms.compose(transforms)
+        self._output_transform = _transforms.compose(output_transforms)
+        self._rng = rng or jax.random.key(0)
+        self._sample_kwargs = sample_kwargs or {}
+        self._metadata = metadata or {}
+
+        self._is_thinking = False
+        self._lock = threading.Lock()
+
+        self._use_ref_img = use_ref_img
+
+        self._thought: str | None = None
+        self._ref_img: np.ndarray | None = None
+        self._initial_scene_plan: str = initial_scene_plan
+        self._scene_plan: str | None = self._initial_scene_plan
+
+        self._action_horizon = model.action_horizon
+        self._action_dim = model.action_dim
+
+        self._instruction: str | None = None
+
+        self._temperature = 0.0
+
+    def start(self):
+        self._reset_thought()
+        print("Start a new rollout.")
+
+    def _reset_thought(self):
+        self.is_thinking = False
+        self._thought = None
+        self._ref_img = None
+        self._scene_plan = self._initial_scene_plan
+        self._instruction = None
+
+    def _prepare_obs(self, obs: dict) -> dict:
+        assert 'prompt' in obs, "The observation must contain a 'prompt' key."
+        instruction = obs['prompt']
+
+        if self._thought is None:
+            self._instruction = 'Instruction: ' + instruction + '\n'
+            self._thought = self._instruction + self._scene_plan
+        obs['thought'] = [self._thought]
+
+        if self._ref_img is None:
+            assert 'image_1' in obs, "The observation must contain an 'image_1' key."
+            self._ref_img = obs['image_1']
+
+        if self._use_ref_img:
+            obs['reference_image'] = self._ref_img
+
+        obs['act_with_outdated_thought'] = False
+        obs['think_with_outdated_thought'] = False
+        return obs
+
+    def _update_thought(self, model_output: str, obs: dict):
+        self._scene_plan = model_output
+        self._thought = self._instruction + self._scene_plan
+        self._ref_img = obs['image_1']
+        print('Updated prefix: ')
+        print(self._thought)
+        print('-----------------------------------\n')
+
+    def _warmup(self, inputs: dict) -> dict:
+        print('Warmup...')
+        inputs = self._prepare_obs(inputs)
+        inputs = self._input_transform(inputs)
+        inputs = jax.tree.map(lambda x: jnp.asarray(x)[np.newaxis, ...], inputs)
+        inputs = _model.FuseObservation.from_dict(inputs)
+
+        prefill_rng, think_rng, act_rng, self._rng = jax.random.split(self._rng, 4)
+
+        processed_inputs, prefix_cache, first_suffix_token, \
+            last_logit, prefix_mask, prefill_len, prefill_size, to_act = \
+            self._prefill(prefill_rng, inputs)
+
+        action_tokens = self._act(act_rng, prefix_cache, prefix_mask,
+                                  prefill_len, prefill_size)
+        suffix_tokens = self._reason(think_rng, last_logit, prefix_cache,
+                                     prefill_len, prefill_size)
+
+        outputs = {
+            "state": inputs.state,
+            "actions": action_tokens,
+            "tokenized_suffix": suffix_tokens,
+        }
+
+        self._reset_thought()
+        outputs = jax.tree.map(lambda x: np.asarray(x[0, ...]), outputs)
+        transformed = self._output_transform(outputs)
+        return transformed
+
+    @override
+    def infer(self, obs: dict) -> dict:
+        inputs = jax.tree.map(lambda x: x, obs)
+        warmup = inputs.pop('is_warm_up', False)
+        if warmup:
+            return self._warmup(inputs)
+
+        inputs = self._prepare_obs(inputs)
+        prefix = inputs['thought'][0]
+        inputs = self._input_transform(inputs)
+        inputs = jax.tree.map(lambda x: jnp.asarray(x)[np.newaxis, ...], inputs)
+        inputs = _model.FuseObservation.from_dict(inputs)
+
+        prefill_rng, think_rng, act_rng, self._rng = jax.random.split(self._rng, 4)
+
+        (
+            processed_inputs,
+            prefix_cache,
+            first_suffix_token,
+            last_logit,
+            prefix_mask,
+            prefill_len,
+            prefill_size,
+            to_act,
+        ) = self._prefill(prefill_rng, inputs, temperature=self._temperature)
+        assert jnp.size(to_act) == 1
+        to_act = to_act.item()
+        to_think = not to_act
+
+        if self._scene_plan == self._initial_scene_plan:
+            to_think = True
+            to_act = False
+
+        self.is_thinking = to_think
+
+        action_tokens = np.zeros((1, 256), dtype=np.int32)
+        suffix_tokens = np.ones((1, 1), dtype=np.int32)
+
+        if to_act:
+            action_tokens = self._act(act_rng, prefix_cache, prefix_mask,
+                                      prefill_len, prefill_size)
+        else:
+            print('Prefix:')
+            print(prefix)
+            print('Thinking...')
+            suffix_tokens = self._reason(think_rng, last_logit, prefix_cache,
+                                         prefill_len, prefill_size,
+                                         temperature=self._temperature)
+
+        outputs = {
+            "state": inputs.state,
+            "actions": action_tokens,
+            "tokenized_suffix": suffix_tokens,
+        }
+
+        outputs = jax.tree.map(lambda x: np.asarray(x[0, ...]), outputs)
+        transformed = self._output_transform(outputs)
+
+        if to_think:
+            print(transformed['thoughts'])
+            self._update_thought(transformed['thoughts'], obs)
+            self.is_thinking = False
+            return {'isthinking': np.True_}
+
+        return transformed
+
+    @property
+    def is_thinking(self) -> bool:
+        with self._lock:
+            return self._is_thinking
+
     @is_thinking.setter
     def is_thinking(self, value: bool):
         with self._lock:

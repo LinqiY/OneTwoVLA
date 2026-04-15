@@ -324,6 +324,145 @@ class ExtractFASTActions(DataTransformFn):
             "actions": actions,
         }
 
+# @dataclasses.dataclass(frozen=True)
+# class FuseTokenizeFASTInputs(DataTransformFn):
+#     tokenizer: _tokenizer.FuseFASTTokenizer
+#     validation: bool = False
+
+#     def __call__(self, data: DataDict) -> DataDict:
+#         _ = data.pop("prompt", None)
+#         thought = data.pop("thought", None)
+#         if thought is None:
+#             raise ValueError("Thought is required")
+
+#         state = data["state"]
+#         actions = data.get("actions") if not self.validation else None
+
+#         tokens, token_mask, ar_mask, text_loss_mask, diffusion_loss_mask = (
+#             self.tokenizer.tokenize(
+#                 thought, state, actions,
+#                 data["act_with_outdated_thought"],
+#                 data["think_with_outdated_thought"],
+#             )
+#         )
+
+#         return {
+#             **data,
+#             "tokenized_prompt": tokens,
+#             "tokenized_prompt_mask": token_mask,
+#             "token_ar_mask": ar_mask,
+#             "token_loss_mask": text_loss_mask,
+#             "diffusion_loss_mask": diffusion_loss_mask,
+#         }
+
+
+# @dataclasses.dataclass(frozen=True)
+# class ExtractFASTFuseActions(DataTransformFn):
+#     tokenizer: _tokenizer.FuseFASTTokenizer
+#     action_horizon: int
+#     action_dim: int
+
+#     def __call__(self, data: DataDict) -> DataDict:
+#         if "actions" not in data:
+#             return data
+#         tokens = data.pop("actions")
+#         actions = self.tokenizer.extract_actions(tokens.astype(np.int32), self.action_horizon, self.action_dim)
+#         return {**data, "actions": actions}
+
+
+# @dataclasses.dataclass(frozen=True)
+# class ExtractFASTFuseThoughts(DataTransformFn):
+#     tokenizer: _tokenizer.FuseFASTTokenizer
+
+#     def __call__(self, data: DataDict) -> DataDict:
+#         if "tokenized_suffix" not in data:
+#             return data
+#         tokens = data["tokenized_suffix"]
+#         thoughts = self.tokenizer.extract_thoughts(tokens)
+#         return {**data, "thoughts": thoughts}
+
+
+@dataclasses.dataclass(frozen=True)
+class VQAInputs(DataTransformFn):
+    """Repack VL/VQA sample into PiFAST-compatible input format."""
+
+    model_state_dim: int
+    action_horizon: int
+    action_dim: int
+
+    def __call__(self, data: DataDict) -> DataDict:
+        images = data["images"]
+        if not isinstance(images, (list, tuple)) or len(images) == 0:
+            raise ValueError("VQAInputs expects non-empty 'images' list")
+
+        base_image = np.asarray(images[0], dtype=np.uint8)
+
+        has_second = len(images) > 1
+        has_third = len(images) > 2
+
+        second_image = np.asarray(images[1], dtype=np.uint8) if has_second else np.zeros_like(base_image)
+        third_image = np.asarray(images[2], dtype=np.uint8) if has_third else np.zeros_like(base_image)
+
+        question = data["question"]
+        answer = data["answer"]
+
+        if not isinstance(question, str):
+            question = question.item() if hasattr(question, "item") else str(question)
+        if not isinstance(answer, str):
+            answer = answer.item() if hasattr(answer, "item") else str(answer)
+
+        state = np.zeros((self.model_state_dim,), dtype=np.float32)
+        actions = np.zeros((self.action_horizon, self.action_dim), dtype=np.float32)
+
+        return {
+            "state": state,
+            "image": {
+                "base_0_rgb": base_image,
+                "left_wrist_0_rgb": second_image,
+                "right_wrist_0_rgb": third_image,
+            },
+            "image_mask": {
+                "base_0_rgb": np.True_,
+                "left_wrist_0_rgb": np.bool_(has_second),
+                "right_wrist_0_rgb": np.bool_(has_third),
+            },
+            "question": question,
+            "answer": answer,
+            "actions": actions,
+        }
+        
+@dataclasses.dataclass(frozen=True)
+class TokenizeFASTVQAInputs(DataTransformFn):
+    tokenizer: _tokenizer.FASTTokenizer
+
+    def __call__(self, data: DataDict) -> DataDict:
+        question = data.pop("question", None)
+        answer = data.pop("answer", None)
+
+        if question is None:
+            raise ValueError("Question is required")
+        if answer is None:
+            raise ValueError("Answer is required")
+
+        if not isinstance(question, str):
+            question = question.item() if hasattr(question, "item") else str(question)
+        if not isinstance(answer, str):
+            answer = answer.item() if hasattr(answer, "item") else str(answer)
+
+        state = data["state"]
+
+        tokens, token_mask, ar_mask, loss_mask = self.tokenizer.tokenize_vqa(
+            question, state, answer
+        )
+
+        return {
+            **data,
+            "tokenized_prompt": tokens,
+            "tokenized_prompt_mask": token_mask,
+            "token_ar_mask": ar_mask,
+            "token_loss_mask": loss_mask,
+        }
+
 @dataclasses.dataclass(frozen=True)
 class ExtractThoughts(DataTransformFn):
     tokenizer: _tokenizer.FusePaligemmaTokenizer

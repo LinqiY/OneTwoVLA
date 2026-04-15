@@ -45,7 +45,8 @@ def inspect_prompts(
         ) -> str:
     """Converts a PyTree of prompts into a human-readable string for logging."""
     tokenized_prompt = batch[0].tokenized_prompt
-    path = download.maybe_download("gs://big_vision/paligemma_tokenizer.model", gs={"token": "anon"})
+    # path = download.maybe_download("gs://big_vision/paligemma_tokenizer.model", gs={"token": "anon"})
+    path = download.maybe_download("/inspire/hdd/global_user/gongjingjing-25039/lqyin/models/paligemma_tokenizer.model", gs={"token": "anon"})
     with path.open("rb") as f:
         tokenizer = sentencepiece.SentencePieceProcessor(model_proto=f.read())
     
