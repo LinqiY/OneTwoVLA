@@ -3,6 +3,7 @@ export PATH="/inspire/hdd/global_user/gongjingjing-25039/lqyin/OneTwoVLA/.venv/b
 export WANDB_MODE=offline
 export HF_DATASETS_CACHE=/inspire/hdd/global_user/gongjingjing-25039/lqyin/hf_cache/
 
+# PYTHON="/inspire/hdd/global_user/gongjingjing-25039/lqyin/OneTwoVLA/.venv/bin/python"
 
 logging_time=$(date "+%d-%H.%M.%S")
 now_seconds="${logging_time: -8}"

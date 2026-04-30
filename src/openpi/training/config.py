@@ -366,6 +366,43 @@ class LeRobotLiberoDataConfig(DataConfigFactory):
             model_transforms=model_transforms,
         )
 
+
+@dataclasses.dataclass(frozen=True)
+class LeRobotWidowDataConfig(DataConfigFactory):
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        repack_transform = _transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(
+                    {
+                        "observation/image": "image",
+                        "observation/state": "state",
+                        "actions": "actions",
+                        "prompt": "prompt",
+                    }
+                )
+            ]
+        )
+
+        data_transforms = _transforms.Group(
+            inputs=[libero_policy.LiberoTopOnlyInputs(action_dim=model_config.action_dim, model_type=model_config.model_type)],
+            outputs=[libero_policy.LiberoOutputs()],
+        )
+        delta_action_mask = _transforms.make_bool_mask(6, -1)
+        data_transforms = data_transforms.push(
+            inputs=[_transforms.DeltaActions(delta_action_mask)],
+            outputs=[_transforms.AbsoluteActions(delta_action_mask)],
+        )
+
+        model_transforms = ModelTransformFactory()(model_config)
+
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs),
+            repack_transforms=repack_transform,
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+        )
+
 @dataclasses.dataclass(frozen=True)
 class LeRobotUMIDataConfig(DataConfigFactory):
     @override
@@ -522,11 +559,13 @@ class AlignedLeRobotVLABenchDataConfig(DataConfigFactory):
 
 @dataclasses.dataclass(frozen=True)
 class VLGroupConfig:
-    """One VL pool after path resolution: merged JSON list + sampling weight vs other pools."""
+    """One VL pool: ShareRobot JSON files, or parquet shards keyed by parquet_source_id."""
 
     json_paths: tuple[str, ...]
     image_root: str | None
     interleave_prob: float = 1.0
+    parquet_source_id: str | None = None
+    parquet_paths: tuple[str, ...] = ()
 
 
 @dataclasses.dataclass(frozen=True)
@@ -547,6 +586,16 @@ class VLVQADatasetSource:
 
 
 @dataclasses.dataclass(frozen=True)
+class VLVQAParquetSource:
+    """One parquet VL pool (e.g. LaTeX OCR). `path` is a file, directory of `*.parquet`, or glob."""
+
+    source_id: str
+    path: str
+    interleave_prob: float = 1.0
+    image_root: str | None = None
+
+
+@dataclasses.dataclass(frozen=True)
 class VLVQADataConfig(DataConfigFactory):
     """
     DataConfigFactory for VL/VQA co-training data.
@@ -558,29 +607,36 @@ class VLVQADataConfig(DataConfigFactory):
     - Either set legacy `vl_json_path` + `vl_image_root`, or set non-empty `vl_sources` (then
       `vl_json_path` is optional for Tyro / CLI). Directory `path` expands to all `*.json` in that
       folder, concatenated as one pool.
+    - Optionally set `vl_parquet_sources` for parquet-backed VL (e.g. `latex_ocr`). Can be combined
+      with `vl_sources`. By default JSON groups are listed before parquet groups; set
+      `vl_parquet_sources_first=True` to list parquet groups first (must match `interleave_prob` order).
     """
     repo_id: str = "vl_vqa"
     vl_json_path: str | None = None
     vl_image_root: str = tyro.MISSING
     vl_sources: tuple[VLVQADatasetSource, ...] = ()
+    vl_parquet_sources: tuple[VLVQAParquetSource, ...] = ()
+    vl_parquet_sources_first: bool = False
     vl_shuffle: bool = True
 
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> VLDataConfig:
+        from openpi.policies.parquet_vl_dataset import expand_parquet_paths
         from openpi.policies.vl_dataset import expand_vl_path_to_json_files
 
         base = self.create_base_config(assets_dirs)
 
         default_root = None if self.vl_image_root is tyro.MISSING else self.vl_image_root
 
-        if self.vl_sources:
-            groups: list[VLGroupConfig] = []
+        groups: list[VLGroupConfig] = []
+
+        def _append_json_sources() -> None:
             for src in self.vl_sources:
                 json_paths = tuple(expand_vl_path_to_json_files(src.path))
                 img_root = src.image_root if src.image_root is not None else default_root
                 if img_root is None:
                     raise ValueError(
-                        "Each VL source needs an `image_root` or set factory `vl_image_root` as default."
+                        "Each VL JSON source needs an `image_root` or set factory `vl_image_root` as default."
                     )
                 if src.interleave_prob < 0:
                     raise ValueError(f"interleave_prob must be >= 0, got {src.interleave_prob}")
@@ -591,20 +647,60 @@ class VLVQADataConfig(DataConfigFactory):
                         interleave_prob=src.interleave_prob,
                     )
                 )
-            if sum(g.interleave_prob for g in groups) <= 0:
-                raise ValueError("Sum of `interleave_prob` over `vl_sources` must be > 0.")
-            vl_groups = tuple(groups)
-            vl_json_path = vl_groups[0].json_paths[0]
-            vl_image_root = vl_groups[0].image_root
+
+        def _append_parquet_sources() -> None:
+            for psrc in self.vl_parquet_sources:
+                ppaths = tuple(expand_parquet_paths(psrc.path))
+                if not ppaths:
+                    raise ValueError(f"No parquet files resolved for vl_parquet_sources path: {psrc.path!r}")
+                img_root = psrc.image_root if psrc.image_root is not None else default_root
+                if psrc.interleave_prob < 0:
+                    raise ValueError(f"interleave_prob must be >= 0, got {psrc.interleave_prob}")
+                groups.append(
+                    VLGroupConfig(
+                        json_paths=(),
+                        image_root=img_root,
+                        interleave_prob=psrc.interleave_prob,
+                        parquet_source_id=psrc.source_id,
+                        parquet_paths=ppaths,
+                    )
+                )
+
+        if self.vl_parquet_sources_first:
+            _append_parquet_sources()
+            _append_json_sources()
         else:
-            if not self.vl_json_path:
-                raise ValueError("Set `vl_json_path`/`vl_image_root` or non-empty `vl_sources`.")
+            _append_json_sources()
+            _append_parquet_sources()
+
+        if groups:
+            if sum(g.interleave_prob for g in groups) <= 0:
+                raise ValueError("Sum of `interleave_prob` over all VL groups must be > 0.")
+            vl_groups = tuple(groups)
+            first = vl_groups[0]
+            if first.parquet_source_id and first.parquet_paths:
+                vl_json_path = first.parquet_paths[0]
+                vl_image_root = (
+                    first.image_root
+                    if first.image_root is not None
+                    else str(pathlib.Path(first.parquet_paths[0]).parent)
+                )
+            else:
+                if not first.json_paths:
+                    raise ValueError("First VL group has empty json_paths.")
+                vl_json_path = first.json_paths[0]
+                vl_image_root = first.image_root
+        elif self.vl_json_path:
             if self.vl_image_root is tyro.MISSING:
-                raise ValueError("`vl_image_root` is required when `vl_sources` is empty.")
+                raise ValueError("`vl_image_root` is required when `vl_sources` and `vl_parquet_sources` are empty.")
             json_paths = tuple(expand_vl_path_to_json_files(self.vl_json_path))
             vl_groups = (VLGroupConfig(json_paths=json_paths, image_root=default_root, interleave_prob=1.0),)
             vl_json_path = json_paths[0]
             vl_image_root = default_root
+        else:
+            raise ValueError(
+                "Set `vl_json_path`/`vl_image_root`, non-empty `vl_sources`, or non-empty `vl_parquet_sources`."
+            )
 
         return VLDataConfig(
             repo_id=base.repo_id,
@@ -985,24 +1081,6 @@ _CONFIGS = [
         use_val_dataset=True,
         # val_ratio=0.05,
     ),
-    # pifast
-    TrainConfig(
-        name="pifast_vlabench_pretrain_primitive",
-        model=pi0_fast.Pi0FASTConfig(action_dim=7, action_horizon=10, max_token_len=180, paligemma_variant="gemma_2b"),
-        data=LeRobotVLABenchDataConfig(
-            repo_id="vlabench/vlabench_pretrain_primitive",
-            base_config=DataConfig(
-                prompt_from_task=True,
-                local_files_only=True,
-            ),
-        ),
-        weight_loader=weight_loaders.PaliGemmaWeightLoader("/inspire/hdd/global_user/gongjingjing-25039/lqyin/models/paligemma-3b-pt-224-jax/paligemma-3b-pt-224.npz"),
-        use_val_dataset=False,
-        # val_ratio=0.05,
-        num_train_steps=30_000,
-        batch_size=32,
-        num_workers=64,
-    ),
     # pifast fuse only action
     TrainConfig(
         name="pi0_fast_fuse_vlabench_pretrain_primitive",
@@ -1020,14 +1098,10 @@ _CONFIGS = [
         batch_size=32,
         num_workers=64,        
     ),
-    CotrainConfig(
-        name="pifast_vlabench_cotrain",
-        model=pi0_fast.Pi0FASTConfig(
-            action_dim=7,
-            action_horizon=10,
-            max_token_len=256,
-            paligemma_variant="gemma_2b",
-        ),
+    # wo pretrain action
+    TrainConfig(
+        name="pifast_vlabench_pretrain_primitive",
+        model=pi0_fast.Pi0FASTConfig(action_dim=7, action_horizon=10, max_token_len=180, paligemma_variant="gemma_2b"),
         data=LeRobotVLABenchDataConfig(
             repo_id="vlabench/vlabench_pretrain_primitive",
             base_config=DataConfig(
@@ -1035,24 +1109,53 @@ _CONFIGS = [
                 local_files_only=True,
             ),
         ),
-        vl_data=VLVQADataConfig(
-            # 关键：复用 VLABench 的 norm stats，而不是默认去找 vl_vqa 的 assets
-            assets=AssetsConfig(asset_id="vlabench/vlabench_pretrain_primitive"),
-            vl_json_path="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/dataset/vl_dataset/vlabench_vqa_assets/primitive/jsons_train/task_planning/action_understanding_cot_train.json",
-            vl_image_root="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/dataset/vl_dataset/vlabench_vqa_assets/primitive",
-            base_config=DataConfig(
-                local_files_only=True,
-            ),
-        ),
-        cotrain_ratio=0.25,
-        weight_loader=weight_loaders.PaliGemmaWeightLoader(
-            "/inspire/hdd/global_user/gongjingjing-25039/lqyin/models/paligemma-3b-pt-224-jax/paligemma-3b-pt-224.npz"
-        ),
+        weight_loader=weight_loaders.PaliGemmaWeightLoader("/inspire/hdd/global_user/gongjingjing-25039/lqyin/models/paligemma-3b-pt-224-jax/paligemma-3b-pt-224.npz"),
         use_val_dataset=False,
+        # val_ratio=0.05,
         num_train_steps=30_000,
         batch_size=32,
         num_workers=64,
     ),
+    TrainConfig(
+        name="pi0_fast_widowx",
+        model=pi0_fast.Pi0FASTConfig(action_dim=7, action_horizon=10, max_token_len=180, paligemma_variant="gemma_2b"),
+        data=LeRobotWidowDataConfig(
+            repo_id="/inspire/hdd/global_user/gongjingjing-25039/lqyin/widowX_dataset/lerobot_2_1/bag",
+            assets=AssetsConfig(
+                assets_dir="/inspire/hdd/global_user/gongjingjing-25039/lqyin/widowX_dataset/lerobot_2_1/verified_assets",
+                asset_id="widowx_bag",
+            ),
+            base_config=DataConfig(
+                prompt_from_task=True,
+                local_files_only=True,
+            ),
+        ),
+        weight_loader=weight_loaders.PaliGemmaWeightLoader("/inspire/hdd/global_user/gongjingjing-25039/lqyin/models/paligemma-3b-pt-224-jax/paligemma-3b-pt-224.npz"),
+        use_val_dataset=False,
+        # val_ratio=0.05,
+        num_train_steps=30_000,
+        batch_size=32,
+        num_workers=64,
+    ),
+    # wo pretrain in cotrain
+    CotrainConfig(
+        name="pifast_vlabench_pretrain_primitive_test",
+        model=pi0_fast.Pi0FASTConfig(action_dim=7, action_horizon=10, max_token_len=180, paligemma_variant="gemma_2b"),
+        data=LeRobotVLABenchDataConfig(
+            repo_id="vlabench/vlabench_pretrain_primitive",
+            base_config=DataConfig(
+                prompt_from_task=True,
+                local_files_only=True,
+            ),
+        ),
+        weight_loader=weight_loaders.PaliGemmaWeightLoader("/inspire/hdd/global_user/gongjingjing-25039/lqyin/models/paligemma-3b-pt-224-jax/paligemma-3b-pt-224.npz"),
+        use_val_dataset=False,
+        # val_ratio=0.05,
+        num_train_steps=30_000,
+        batch_size=32,
+        num_workers=64,
+    ),
+    # wo pretrain eb
     CotrainConfig(
         name="pifast_vlabench_cotrain_eb",
         model=pi0_fast.Pi0FASTConfig(
@@ -1100,6 +1203,330 @@ _CONFIGS = [
         cotrain_ratio=0.25,
         weight_loader=weight_loaders.PaliGemmaWeightLoader(
             "/inspire/hdd/global_user/gongjingjing-25039/lqyin/models/paligemma-3b-pt-224-jax/paligemma-3b-pt-224.npz"
+        ),
+        use_val_dataset=False,
+        num_train_steps=30_000,
+        batch_size=32,
+        num_workers=64,
+    ),
+    # wo pretrain  mm
+    CotrainConfig(
+        name="pifast_vlabench_cotrain_mm_data",
+        model=pi0_fast.Pi0FASTConfig(
+            action_dim=7,
+            action_horizon=10,
+            max_token_len=512,
+            paligemma_variant="gemma_2b",
+        ),
+        data=LeRobotVLABenchDataConfig(
+            repo_id="vlabench/vlabench_pretrain_primitive",
+            base_config=DataConfig(
+                prompt_from_task=True,
+                local_files_only=True,
+            ),
+        ),
+        vl_data=VLVQADataConfig(
+            assets=AssetsConfig(asset_id="vlabench/vlabench_pretrain_primitive"),
+            vl_image_root="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/dataset/vl_dataset/LaTeX_OCR/",
+            vl_parquet_sources=(
+                VLVQAParquetSource(
+                    source_id="latex_ocr",
+                    path="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/dataset/vl_dataset/LaTeX_OCR/",
+                    interleave_prob=0.10,
+                    image_root="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/dataset/vl_dataset/LaTeX_OCR/",
+                ),
+                VLVQAParquetSource(
+                    source_id="coco",
+                    path="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/dataset/vl_dataset/coco/data_rg256_jpeg448_leq512",
+                    interleave_prob=0.15,
+                    image_root="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/dataset/vl_dataset/coco/",
+                ),
+                VLVQAParquetSource(
+                    source_id="a_okvqa",
+                    path="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/dataset/vl_dataset/A-OKVQA/data",
+                    interleave_prob=0.75,
+                    image_root="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/dataset/vl_dataset/A-OKVQA/",
+                ),
+            ),
+            base_config=DataConfig(
+                local_files_only=True,
+            ),
+        ),
+        cotrain_ratio=0.25,
+        weight_loader=weight_loaders.PaliGemmaWeightLoader(
+            "/inspire/hdd/global_user/gongjingjing-25039/lqyin/models/paligemma-3b-pt-224-jax/paligemma-3b-pt-224.npz"
+        ),
+        use_val_dataset=False,
+        num_train_steps=30_000,
+        batch_size=32,
+        num_workers=64,
+    ),
+    # wo pretrain mm and eb
+    CotrainConfig(
+        name="pifast_vlabench_cotrain_mm_and_eb",
+        model=pi0_fast.Pi0FASTConfig(
+            action_dim=7,
+            action_horizon=10,
+            max_token_len=512,
+            paligemma_variant="gemma_2b",
+        ),
+        data=LeRobotVLABenchDataConfig(
+            repo_id="vlabench/vlabench_pretrain_primitive",
+            base_config=DataConfig(
+                prompt_from_task=True,
+                local_files_only=True,
+            ),
+        ),
+        vl_data=VLVQADataConfig(
+            assets=AssetsConfig(asset_id="vlabench/vlabench_pretrain_primitive"),
+            vl_image_root="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/dataset/vl_dataset/vlabench_vqa_assets/primitive",
+            vl_parquet_sources_first=True,
+            vl_parquet_sources=(
+                VLVQAParquetSource(
+                    source_id="latex_ocr",
+                    path="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/dataset/vl_dataset/LaTeX_OCR/",
+                    interleave_prob=0.02,
+                    image_root="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/dataset/vl_dataset/LaTeX_OCR/",
+                ),
+                VLVQAParquetSource(
+                    source_id="coco",
+                    path="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/dataset/vl_dataset/coco/data_rg256_jpeg448_leq512",
+                    interleave_prob=0.05,
+                    image_root="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/dataset/vl_dataset/coco/",
+                ),
+                VLVQAParquetSource(
+                    source_id="a_okvqa",
+                    path="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/dataset/vl_dataset/A-OKVQA/data",
+                    interleave_prob=0.22,
+                    image_root="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/dataset/vl_dataset/A-OKVQA/",
+                ),
+            ),
+            vl_sources=(
+                VLVQADatasetSource(
+                    path="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/dataset/vl_dataset/vlabench_vqa_assets/primitive/jsons_train/affordance",
+                    interleave_prob=0.16,
+                ),
+                VLVQADatasetSource(
+                    path="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/dataset/vl_dataset/vlabench_vqa_assets/primitive/jsons_train/goal_description",
+                    interleave_prob=0.10,
+                ),
+                VLVQADatasetSource(
+                    path="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/dataset/vl_dataset/vlabench_vqa_assets/primitive/jsons_train/spatial_understanding",
+                    interleave_prob=0.17,
+                ),
+                VLVQADatasetSource(
+                    path="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/dataset/vl_dataset/vlabench_vqa_assets/primitive/jsons_train/task_planning",
+                    interleave_prob=0.10,
+                ),
+                VLVQADatasetSource(
+                    path="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/dataset/vl_dataset/vlabench_vqa_assets/primitive/jsons_train/trajectory",
+                    interleave_prob=0.18,
+                ),
+            ),
+            base_config=DataConfig(
+                local_files_only=True,
+            ),
+        ),
+        cotrain_ratio=0.25,
+        weight_loader=weight_loaders.PaliGemmaWeightLoader(
+            "/inspire/hdd/global_user/gongjingjing-25039/lqyin/models/paligemma-3b-pt-224-jax/paligemma-3b-pt-224.npz"
+        ),
+        use_val_dataset=False,
+        num_train_steps=30_000,
+        batch_size=32,
+        num_workers=64,
+    ),
+    # VLABench-tuned PaliGemma init (pifast_w_*): same as above four configs, new weight + assets dirs.
+    TrainConfig(
+        name="pifast_w_vlabench_pretrain_primitive_test",
+        model=pi0_fast.Pi0FASTConfig(action_dim=7, action_horizon=10, max_token_len=180, paligemma_variant="gemma_2b"),
+        data=LeRobotVLABenchDataConfig(
+            repo_id="vlabench/vlabench_pretrain_primitive",
+            base_config=DataConfig(
+                prompt_from_task=True,
+                local_files_only=True,
+            ),
+        ),
+        weight_loader=weight_loaders.PaliGemmaWeightLoader(
+            "/inspire/hdd/global_user/gongjingjing-25039/lqyin/models/paligemma-3b-pt-224-vlabench-jax/paligemma-3b-pt-224.npz"
+        ),
+        use_val_dataset=False,
+        num_train_steps=30_000,
+        batch_size=32,
+        num_workers=64,
+    ),
+    CotrainConfig(
+        name="pifast_w_vlabench_cotrain_eb",
+        model=pi0_fast.Pi0FASTConfig(
+            action_dim=7,
+            action_horizon=10,
+            max_token_len=320,
+            paligemma_variant="gemma_2b",
+        ),
+        data=LeRobotVLABenchDataConfig(
+            repo_id="vlabench/vlabench_pretrain_primitive",
+            base_config=DataConfig(
+                prompt_from_task=True,
+                local_files_only=True,
+            ),
+        ),
+        vl_data=VLVQADataConfig(
+            assets=AssetsConfig(asset_id="vlabench/vlabench_pretrain_primitive"),
+            vl_image_root="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/dataset/vl_dataset/vlabench_vqa_assets/primitive",
+            vl_sources=(
+                VLVQADatasetSource(
+                    path="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/dataset/vl_dataset/vlabench_vqa_assets/primitive/jsons_train/affordance",
+                    interleave_prob=0.22,
+                ),
+                VLVQADatasetSource(
+                    path="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/dataset/vl_dataset/vlabench_vqa_assets/primitive/jsons_train/goal_description",
+                    interleave_prob=0.14,
+                ),
+                VLVQADatasetSource(
+                    path="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/dataset/vl_dataset/vlabench_vqa_assets/primitive/jsons_train/spatial_understanding",
+                    interleave_prob=0.24,
+                ),
+                VLVQADatasetSource(
+                    path="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/dataset/vl_dataset/vlabench_vqa_assets/primitive/jsons_train/task_planning",
+                    interleave_prob=0.14,
+                ),
+                VLVQADatasetSource(
+                    path="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/dataset/vl_dataset/vlabench_vqa_assets/primitive/jsons_train/trajectory",
+                    interleave_prob=0.26,
+                ),
+            ),
+            base_config=DataConfig(
+                local_files_only=True,
+            ),
+        ),
+        cotrain_ratio=0.25,
+        weight_loader=weight_loaders.PaliGemmaWeightLoader(
+            "/inspire/hdd/global_user/gongjingjing-25039/lqyin/models/paligemma-3b-pt-224-vlabench-jax/paligemma-3b-pt-224.npz"
+        ),
+        use_val_dataset=False,
+        num_train_steps=30_000,
+        batch_size=32,
+        num_workers=64,
+    ),
+    CotrainConfig(
+        name="pifast_w_vlabench_cotrain_mm_data",
+        model=pi0_fast.Pi0FASTConfig(
+            action_dim=7,
+            action_horizon=10,
+            max_token_len=512,
+            paligemma_variant="gemma_2b",
+        ),
+        data=LeRobotVLABenchDataConfig(
+            repo_id="vlabench/vlabench_pretrain_primitive",
+            base_config=DataConfig(
+                prompt_from_task=True,
+                local_files_only=True,
+            ),
+        ),
+        vl_data=VLVQADataConfig(
+            assets=AssetsConfig(asset_id="vlabench/vlabench_pretrain_primitive"),
+            vl_image_root="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/dataset/vl_dataset/LaTeX_OCR/",
+            vl_parquet_sources=(
+                VLVQAParquetSource(
+                    source_id="latex_ocr",
+                    path="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/dataset/vl_dataset/LaTeX_OCR/",
+                    interleave_prob=0.10,
+                    image_root="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/dataset/vl_dataset/LaTeX_OCR/",
+                ),
+                VLVQAParquetSource(
+                    source_id="coco",
+                    path="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/dataset/vl_dataset/coco/data_rg256_jpeg448_leq512",
+                    interleave_prob=0.15,
+                    image_root="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/dataset/vl_dataset/coco/",
+                ),
+                VLVQAParquetSource(
+                    source_id="a_okvqa",
+                    path="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/dataset/vl_dataset/A-OKVQA/data",
+                    interleave_prob=0.75,
+                    image_root="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/dataset/vl_dataset/A-OKVQA/",
+                ),
+            ),
+            base_config=DataConfig(
+                local_files_only=True,
+            ),
+        ),
+        cotrain_ratio=0.25,
+        weight_loader=weight_loaders.PaliGemmaWeightLoader(
+            "/inspire/hdd/global_user/gongjingjing-25039/lqyin/models/paligemma-3b-pt-224-vlabench-jax/paligemma-3b-pt-224.npz"
+        ),
+        use_val_dataset=False,
+        num_train_steps=30_000,
+        batch_size=32,
+        num_workers=64,
+    ),
+    CotrainConfig(
+        name="pifast_w_vlabench_cotrain_mm_and_eb",
+        model=pi0_fast.Pi0FASTConfig(
+            action_dim=7,
+            action_horizon=10,
+            max_token_len=512,
+            paligemma_variant="gemma_2b",
+        ),
+        data=LeRobotVLABenchDataConfig(
+            repo_id="vlabench/vlabench_pretrain_primitive",
+            base_config=DataConfig(
+                prompt_from_task=True,
+                local_files_only=True,
+            ),
+        ),
+        vl_data=VLVQADataConfig(
+            assets=AssetsConfig(asset_id="vlabench/vlabench_pretrain_primitive"),
+            vl_image_root="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/dataset/vl_dataset/vlabench_vqa_assets/primitive",
+            vl_parquet_sources_first=True,
+            vl_parquet_sources=(
+                VLVQAParquetSource(
+                    source_id="latex_ocr",
+                    path="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/dataset/vl_dataset/LaTeX_OCR/",
+                    interleave_prob=0.02,
+                    image_root="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/dataset/vl_dataset/LaTeX_OCR/",
+                ),
+                VLVQAParquetSource(
+                    source_id="coco",
+                    path="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/dataset/vl_dataset/coco/data_rg256_jpeg448_leq512",
+                    interleave_prob=0.05,
+                    image_root="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/dataset/vl_dataset/coco/",
+                ),
+                VLVQAParquetSource(
+                    source_id="a_okvqa",
+                    path="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/dataset/vl_dataset/A-OKVQA/data",
+                    interleave_prob=0.22,
+                    image_root="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/dataset/vl_dataset/A-OKVQA/",
+                ),
+            ),
+            vl_sources=(
+                VLVQADatasetSource(
+                    path="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/dataset/vl_dataset/vlabench_vqa_assets/primitive/jsons_train/affordance",
+                    interleave_prob=0.16,
+                ),
+                VLVQADatasetSource(
+                    path="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/dataset/vl_dataset/vlabench_vqa_assets/primitive/jsons_train/goal_description",
+                    interleave_prob=0.10,
+                ),
+                VLVQADatasetSource(
+                    path="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/dataset/vl_dataset/vlabench_vqa_assets/primitive/jsons_train/spatial_understanding",
+                    interleave_prob=0.17,
+                ),
+                VLVQADatasetSource(
+                    path="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/dataset/vl_dataset/vlabench_vqa_assets/primitive/jsons_train/task_planning",
+                    interleave_prob=0.10,
+                ),
+                VLVQADatasetSource(
+                    path="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/dataset/vl_dataset/vlabench_vqa_assets/primitive/jsons_train/trajectory",
+                    interleave_prob=0.18,
+                ),
+            ),
+            base_config=DataConfig(
+                local_files_only=True,
+            ),
+        ),
+        cotrain_ratio=0.25,
+        weight_loader=weight_loaders.PaliGemmaWeightLoader(
+            "/inspire/hdd/global_user/gongjingjing-25039/lqyin/models/paligemma-3b-pt-224-vlabench-jax/paligemma-3b-pt-224.npz"
         ),
         use_val_dataset=False,
         num_train_steps=30_000,

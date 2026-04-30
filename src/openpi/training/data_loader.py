@@ -1,6 +1,8 @@
 from collections.abc import Iterator, Sequence
+import logging
 import multiprocessing
 import os
+import pathlib
 import typing
 from typing import Protocol, SupportsIndex, TypeVar
 
@@ -82,6 +84,19 @@ class FakeDataset(Dataset):
         return self._num_samples
 
 
+def _resolve_lerobot_repo(data_config: _config.DataConfig) -> tuple[str, pathlib.Path | None]:
+    """Split a local dataset path into the repo id + root form expected by LeRobot."""
+    repo_id = data_config.repo_id
+    if repo_id is None:
+        raise ValueError("Repo ID is not set. Cannot create dataset.")
+
+    repo_path = pathlib.Path(repo_id)
+    if repo_path.is_absolute():
+        return repo_path.name, repo_path
+
+    return repo_id, None
+
+
 def create_dataset(
     data_config: _config.DataConfig,
     model_config: _model.BaseModelConfig,
@@ -97,7 +112,12 @@ def create_dataset(
     if repo_id == "fake":
         return FakeDataset(model_config, num_samples=1024)
 
-    dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(repo_id, local_files_only=data_config.local_files_only)
+    repo_name, repo_root = _resolve_lerobot_repo(data_config)
+    dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(
+        repo_name,
+        root=repo_root,
+        local_files_only=data_config.local_files_only,
+    )
 
     val_dataset = None
     if isinstance(data_config, _config.UMIDataConfig):
@@ -106,7 +126,8 @@ def create_dataset(
             val_dataset = dataset.get_val_dataset()
     else:
         dataset = lerobot_dataset.LeRobotDataset(
-            data_config.repo_id,
+            repo_name,
+            root=repo_root,
             delta_timestamps={
                 key: [t / dataset_meta.fps for t in range(model_config.action_horizon)]
                 for key in data_config.action_sequence_keys
@@ -255,18 +276,39 @@ def create_vl_data_loader(
     num_workers: int = 0,
 ) -> DataLoader[tuple[_model.Observation, _model.Actions]]:
     """Create a VL/VQA data loader for co-training."""
+    from openpi.policies.parquet_vl_dataset import ParquetVQADataset, is_parquet_vl_group
     from openpi.policies.vl_dataset import ShareRobotVQADataset
 
     vl_data_config = config.vl_data.create(config.assets_dirs, config.model)
 
+    any_parquet = any(is_parquet_vl_group(g) for g in vl_data_config.vl_groups)
+    if any_parquet and num_workers > 0:
+        logging.getLogger(__name__).warning(
+            "VL dataloader includes parquet groups; forcing num_workers=0 "
+            "(PyArrow ParquetFile cannot be pickled for DataLoader multiprocessing)."
+        )
+        num_workers = 0
+
     if not vl_data_config.vl_groups:
         raise ValueError("VLDataConfig.vl_groups is empty after create(); check vl_data factory settings.")
 
-    per_group_ds = [
-        ShareRobotVQADataset(json_paths=g.json_paths, image_root=g.image_root) for g in vl_data_config.vl_groups
-    ]
+    per_group_ds: list = []
+    for g in vl_data_config.vl_groups:
+        if is_parquet_vl_group(g):
+            per_group_ds.append(
+                ParquetVQADataset(
+                    g.parquet_paths,
+                    g.parquet_source_id or "",
+                    image_root=g.image_root,
+                )
+            )
+        else:
+            per_group_ds.append(ShareRobotVQADataset(json_paths=g.json_paths, image_root=g.image_root))
+
     for d, g in zip(per_group_ds, vl_data_config.vl_groups, strict=True):
         if len(d) == 0:
+            if is_parquet_vl_group(g):
+                raise ValueError(f"VL parquet group is empty (paths): {list(g.parquet_paths)[:3]}")
             raise ValueError(f"VL group has no samples after loading JSON paths (first paths): {g.json_paths[:3]}")
 
     if len(per_group_ds) == 1:

@@ -19,6 +19,7 @@ class EnvMode(enum.Enum):
     DROID = "droid"
     LIBERO = "libero"
     FAST_BASE = "fast_base"
+    VLABENCH = "vlabench"
     BASE = "base"
 
 
@@ -83,6 +84,10 @@ DEFAULT_CHECKPOINT: dict[EnvMode, Checkpoint] = {
         config="pi0_umi",
         dir="s3://openpi-assets/checkpoints/pi0_base",
     ),
+    EnvMode.VLABENCH: Checkpoint(
+        config="pi0_fast_vlabench_lora",
+        dir="s3://openpi-assets/checkpoints/pi0_fast_libero"
+    )
 }
 
 

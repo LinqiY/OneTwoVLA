@@ -1,4 +1,4 @@
-# source .venv/bin/activate
+source .venv/bin/activate
 # VLA + VL cotrain: scripts/train_cotrain.py, config pifast_vlabench_cotrain
 export PATH="/inspire/hdd/global_user/gongjingjing-25039/lqyin/OneTwoVLA/.venv/bin:$PATH"
 export WANDB_MODE=offline

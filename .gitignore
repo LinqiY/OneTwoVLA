@@ -172,3 +172,11 @@ test_scripts/
 google-cloud-sdk
 # cache for jax
 jax_compilation_cache_dir/
+
+
+# evaluation
+evaluate_results/
+
+# training
+core.*
+logs/

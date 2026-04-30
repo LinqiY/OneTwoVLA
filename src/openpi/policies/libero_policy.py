@@ -74,6 +74,43 @@ class LiberoInputs(transforms.DataTransformFn):
 
 
 @dataclasses.dataclass(frozen=True)
+class LiberoTopOnlyInputs(transforms.DataTransformFn):
+    action_dim: int
+    model_type: _model.ModelType = _model.ModelType.PI0
+
+    def __call__(self, data: dict) -> dict:
+        mask_padding = self.model_type == _model.ModelType.PI0  # We don't mask for pi0-FAST.
+
+        state = transforms.pad_to_dim(data["observation/state"], self.action_dim)
+
+        top_image = _parse_image(data["observation/image"])
+        zero_image = np.zeros_like(top_image)
+
+        inputs = {
+            "state": state,
+            "image": {
+                "base_0_rgb": top_image,
+                "left_wrist_0_rgb": zero_image,
+                "right_wrist_0_rgb": zero_image,
+            },
+            "image_mask": {
+                "base_0_rgb": np.True_,
+                "left_wrist_0_rgb": np.False_,
+                "right_wrist_0_rgb": np.False_ if mask_padding else np.False_,
+            },
+        }
+
+        if "actions" in data:
+            actions = transforms.pad_to_dim(data["actions"], self.action_dim)
+            inputs["actions"] = actions
+
+        if "prompt" in data:
+            inputs["prompt"] = data["prompt"]
+
+        return inputs
+
+
+@dataclasses.dataclass(frozen=True)
 class LiberoOutputs(transforms.DataTransformFn):
     def __call__(self, data: dict) -> dict:
         # Only return the first 7 dims.

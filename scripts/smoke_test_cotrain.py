@@ -61,12 +61,20 @@ def _make_smoke_config(config: _config.TrainConfig) -> _config.TrainConfig:
 
 
 def smoke_test_vl_dataset(config: _config.TrainConfig):
+    from openpi.policies.parquet_vl_dataset import ParquetVQADataset, is_parquet_vl_group
     from openpi.policies.vl_dataset import ShareRobotVQADataset
 
     vl_data_config = config.vl_data.create(config.assets_dirs, config.model)
 
     g0 = vl_data_config.vl_groups[0]
-    ds = ShareRobotVQADataset(json_paths=g0.json_paths, image_root=g0.image_root)
+    if is_parquet_vl_group(g0):
+        ds = ParquetVQADataset(
+            g0.parquet_paths,
+            g0.parquet_source_id or "",
+            image_root=g0.image_root,
+        )
+    else:
+        ds = ShareRobotVQADataset(json_paths=g0.json_paths, image_root=g0.image_root)
 
     _assert(len(ds) > 0, "VL dataset is empty")
 
@@ -91,12 +99,20 @@ def smoke_test_vl_dataset(config: _config.TrainConfig):
 
 
 def smoke_test_vl_transform(config: _config.TrainConfig):
+    from openpi.policies.parquet_vl_dataset import ParquetVQADataset, is_parquet_vl_group
     from openpi.policies.vl_dataset import ShareRobotVQADataset
 
     vl_data_config = config.vl_data.create(config.assets_dirs, config.model)
 
     g0 = vl_data_config.vl_groups[0]
-    ds = ShareRobotVQADataset(json_paths=g0.json_paths, image_root=g0.image_root)
+    if is_parquet_vl_group(g0):
+        ds = ParquetVQADataset(
+            g0.parquet_paths,
+            g0.parquet_source_id or "",
+            image_root=g0.image_root,
+        )
+    else:
+        ds = ShareRobotVQADataset(json_paths=g0.json_paths, image_root=g0.image_root)
     raw_sample = ds[0]
 
     transform = _transforms.compose(
