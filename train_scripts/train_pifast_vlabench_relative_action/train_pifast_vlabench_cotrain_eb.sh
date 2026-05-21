@@ -4,8 +4,6 @@ export PATH="/inspire/hdd/global_user/gongjingjing-25039/lqyin/OneTwoVLA/.venv/b
 export WANDB_MODE=offline
 export HF_DATASETS_CACHE=/inspire/hdd/global_user/gongjingjing-25039/lqyin/hf_cache/
 
-cd "$(dirname "$0")/.."
-
 logging_time=$(date "+%d-%H.%M.%S")
 now_seconds="${logging_time: -8}"
 now_date=$(date "+%Y.%m.%d")
@@ -19,4 +17,5 @@ export LEROBOT_HOME=/inspire/hdd/global_user/gongjingjing-25039/sdzhang/dataset/
 # LeRobot: $LEROBOT_HOME/vlabench/vlabench_pretrain_primitive (see TrainConfig repo_id)
 # VL JSON/images paths are set in config pifast_vlabench_cotrain (vl_data)
 
-XLA_PYTHON_CLIENT_MEM_FRACTION=0.95 python scripts/train_cotrain.py pifast_vlabench_cotrain_eb --exp-name="${now_date}/${now_seconds}/pifast-vlabench-cotrain" --batch-size="$batch_size"
+# XLA_PYTHON_CLIENT_MEM_FRACTION=0.95 python scripts/train_cotrain.py pifast_vlabench_cotrain_eb --exp-name="${now_date}/${now_seconds}/pifast-vlabench-cotrain" --batch-size="$batch_size"
+XLA_PYTHON_CLIENT_MEM_FRACTION=0.95 python scripts/train_cotrain.py pifast_vlabench_cotrain_eb --exp-name="2026.04.18/02.31.16/pifast-vlabench-cotrain" --batch-size="$batch_size" --resume

@@ -160,9 +160,10 @@ def _iter_prefixed_jax_arrays(
     abo = np.zeros((vision_num_layers, vision_hidden), dtype=dtype)
 
     def inv_attn_kernel_qkv(hf_w: torch.Tensor) -> np.ndarray:
-        """HF linear (out,in) -> Flax (in, heads, head_dim)."""
-        t = hf_w.T.reshape(vision_num_heads, vision_head_dim, vision_hidden)
-        return np.transpose(_to_numpy(t, dtype), (2, 0, 1))
+        """HF linear (out, in) -> Flax (in, heads, head_dim)."""
+        t = hf_w.reshape(vision_num_heads, vision_head_dim, vision_hidden)
+        t = t.permute(2, 0, 1).contiguous()
+        return _to_numpy(t, dtype)
 
     def inv_attn_kernel_out(hf_w: torch.Tensor) -> np.ndarray:
         t = hf_w.T.reshape(vision_num_heads, vision_head_dim, vision_hidden)
