@@ -342,17 +342,14 @@ class FASTTokenizer:
     def tokenize_vqa(
         self,
         question: str,
-        state: np.ndarray,
         answer: str,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         cleaned_question = self._clean_text(question)
         cleaned_answer = " ".join(answer.strip().split())
 
-        discretized_state = self._discretize_state(state)
-        state_str = " ".join(map(str, discretized_state))
-
-        # prefix
-        prefix = f"Task: {cleaned_question}, State: {state_str};\n"
+        # VQA samples do not have a real robot state. Keep the VQA prompt state-free
+        # so fake zero states and robot norm stats cannot leak into VL co-training.
+        prefix = f"Task: {cleaned_question};\n"
         prefix_tokens = self._paligemma_tokenizer.encode(prefix, add_bos=True)
 
         # answer template

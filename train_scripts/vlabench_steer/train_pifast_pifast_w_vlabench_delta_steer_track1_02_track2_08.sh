@@ -21,17 +21,11 @@ echo batch_size $batch_size
 export LEROBOT_HOME=/inspire/hdd/global_user/gongjingjing-25039/sdzhang/dataset/lerobot
 # ensure the dataset's path is $LEROBOT_HOME/vlabench
 
-# normalization stats
-# this can only run on a single GPU.
-# this code only needs to run once.
-# CUDA_VISIBLE_DEVICES=0 python scripts/compute_norm_stats.py pi0_vlabench_pretrain_primitive --exp-name=computing-norm \
-# --create_train_val_split --val_ratio=0.05 \
-# --is_computing_norm_stats
 
-XLA_PYTHON_CLIENT_MEM_FRACTION=0.95 python scripts/train_cotrain.py pifast_vlabench_delta_cotrain_eb \
-    --exp-name=${now_date}/${now_seconds}/pifast-vlabench --batch-size=$batch_size \
-    --resume \
-    --save_interval=10000
+XLA_PYTHON_CLIENT_MEM_FRACTION=0.95 python scripts/train_cotrain.py pifast_w_vlabench_delta_steer_track1_02_track2_08 \
+  --exp-name="${now_date}/${now_seconds}/pifast-w-vlabench-cotrain-mm-data" \
+  --batch-size="${batch_size}" \
+  --save_interval=10000
 
 conda activate simpler
 python /inspire/hdd/global_user/gongjingjing-25039/lqyin/gpu_occupy.py

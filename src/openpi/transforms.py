@@ -512,10 +512,8 @@ class TokenizeFASTVQAInputs(DataTransformFn):
         if not isinstance(answer, str):
             answer = answer.item() if hasattr(answer, "item") else str(answer)
 
-        state = data["state"]
-
         tokens, token_mask, ar_mask, loss_mask = self.tokenizer.tokenize_vqa(
-            question, state, answer
+            question, answer
         )
 
         return {

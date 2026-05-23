@@ -1534,7 +1534,7 @@ _CONFIGS = [
         model=pi0_fast.Pi0FASTConfig(
             action_dim=7,
             action_horizon=10,
-            max_token_len=320,
+            max_token_len=512,
             paligemma_variant="gemma_2b",
         ),
         data=AlignedLeRobotVLABenchDataConfig(
@@ -1735,7 +1735,7 @@ _CONFIGS = [
         model=pi0_fast.Pi0FASTConfig(
             action_dim=7,
             action_horizon=10,
-            max_token_len=320,
+            max_token_len=512,
             paligemma_variant="gemma_2b",
         ),
         data=AlignedLeRobotVLABenchDataConfig(
@@ -2302,6 +2302,82 @@ _CONFIGS = [
     ##############################################
     # VLABench steerability - delta action chunk #
     ##############################################
+    # old : now = 2:8
+    CotrainConfig(
+        name="pifast_w_vlabench_delta_steer_track1_02_track2_08",
+        model=pi0_fast.Pi0FASTConfig(
+            action_dim=7,
+            action_horizon=10,
+            max_token_len=512,
+            paligemma_variant="gemma_2b",
+        ),
+        data=AlignedLeRobotVLABenchDataConfig(
+            repo_id="vlabench/vlabench_pretrain_primitive",
+            base_config=DataConfig(
+                prompt_from_task=True,
+                local_files_only=True,
+            ),
+        ),
+        vl_data=VLVQADataConfig(
+            assets=AssetsConfig(asset_id="vlabench/vlabench_pretrain_primitive"),
+            vl_image_root="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/dataset/vl_dataset/vlabench_vqa_assets/primitive",
+            vl_sources=(
+                VLVQADatasetSource(
+                    path="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/dataset/vl_dataset/vlabench_vqa_assets/primitive/jsons_train/affordance",
+                    interleave_prob=0.044,
+                ),
+                VLVQADatasetSource(
+                    path="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/dataset/vl_dataset/vlabench_vqa_assets/primitive/jsons_train/goal_description",
+                    interleave_prob=0.028,
+                ),
+                VLVQADatasetSource(
+                    path="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/dataset/vl_dataset/vlabench_vqa_assets/primitive/jsons_train/spatial_understanding",
+                    interleave_prob=0.048,
+                ),
+                VLVQADatasetSource(
+                    path="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/dataset/vl_dataset/vlabench_vqa_assets/primitive/jsons_train/task_planning",
+                    interleave_prob=0.028,
+                ),
+                VLVQADatasetSource(
+                    path="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/dataset/vl_dataset/vlabench_vqa_assets/primitive/jsons_train/trajectory",
+                    interleave_prob=0.052,
+                ),
+                # track2
+                VLVQADatasetSource(
+                    path="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/dataset/vl_dataset/vlabench_vqa_assets_track_2/primitive/jsons_train/affordance",
+                    interleave_prob=0.176,
+                ),
+                VLVQADatasetSource(
+                    path="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/dataset/vl_dataset/vlabench_vqa_assets_track_2/primitive/jsons_train/goal_description",
+                    interleave_prob=0.112,
+                ),
+                VLVQADatasetSource(
+                    path="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/dataset/vl_dataset/vlabench_vqa_assets_track_2/primitive/jsons_train/spatial_understanding",
+                    interleave_prob=0.192,
+                ),
+                VLVQADatasetSource(
+                    path="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/dataset/vl_dataset/vlabench_vqa_assets_track_2/primitive/jsons_train/task_planning",
+                    interleave_prob=0.112,
+                ),
+                VLVQADatasetSource(
+                    path="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/dataset/vl_dataset/vlabench_vqa_assets_track_2/primitive/jsons_train/trajectory",
+                    interleave_prob=0.208,
+                ),
+            ),
+            base_config=DataConfig(
+                local_files_only=True,
+            ),
+        ),
+        cotrain_ratio=0.25,
+        weight_loader=weight_loaders.PaliGemmaWeightLoader(
+            "/inspire/hdd/global_user/gongjingjing-25039/lqyin/models/paligemma-3b-pt-224-vlabench-2-jax/paligemma-3b-pt-224.npz"
+        ),
+        use_val_dataset=False,
+        num_train_steps=100_000,
+        batch_size=32,
+        num_workers=64,
+    ),
+
     # old : now = 9:1
     CotrainConfig(
         name="pifast_w_vlabench_delta_steer_track1_09_track2_01",

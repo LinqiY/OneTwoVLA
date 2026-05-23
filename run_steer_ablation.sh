@@ -14,8 +14,7 @@ OPTS_1="--track track_1_in_distribution --parallel-workers 8"
 # 与 track_2_cross_category.json 一致，排除 insert_flower
 OPTS_2="--track track_2_cross_category --task ${TRACK2_TASKS} --parallel-workers 8"
 
-${RUN} /inspire/hdd/global_user/gongjingjing-25039/lqyin/OneTwoVLA/checkpoints/pifast_w_vlabench_delta_steer_track1_094_track2_006/2026.05.20/08.57.49/pifast_w_vlabench_delta_steer_track1_094_track2_006/99999 ${OPTS_2}
-${RUN} /inspire/hdd/global_user/gongjingjing-25039/lqyin/OneTwoVLA/checkpoints/pifast_w_vlabench_delta_steer_track1_094_track2_006/2026.05.20/08.57.49/pifast_w_vlabench_delta_steer_track1_094_track2_006/99999 ${OPTS_1}
+${RUN} /inspire/hdd/global_user/gongjingjing-25039/lqyin/OneTwoVLA/checkpoints/pifast_w_vlabench_delta_steer_track1_02_track2_08/2026.05.22/14.52.05/pifast-w-vlabench-cotrain-mm-data/99999 ${OPTS_2}
 
 # ${RUN} /inspire/hdd/global_user/gongjingjing-25039/lqyin/OneTwoVLA/checkpoints/pifast_w_vlabench_delta_steer_track1_05_track2_05/2026.05.16/18.11.38/pifast-w-vlabench-cotrain-mm-data/30000 ${OPTS_2}
 # ${RUN} /inspire/hdd/global_user/gongjingjing-25039/lqyin/OneTwoVLA/checkpoints/pifast_w_vlabench_delta_steer_track1_05_track2_05/2026.05.16/18.11.38/pifast-w-vlabench-cotrain-mm-data/30000 ${OPTS_1}
