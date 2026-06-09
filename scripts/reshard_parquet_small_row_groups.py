@@ -7,8 +7,8 @@ Why: ParquetVQADataset reads an entire row group for each random sample
 huge row group per file (~GB of image.bytes), which makes training I/O orders
 of magnitude slower than LaTeX-style shards with ~100 rows per group.
 
-This script reads each input row group once, then writes the same rows split
-into multiple output row groups (peak memory ≈ largest input row group).
+This script streams each input file in small record batches, then writes the
+same rows split into multiple output row groups (peak memory ≈ one batch).
 
 Example (COCO cotrain parquet):
   python scripts/reshard_parquet_small_row_groups.py \\
@@ -28,6 +28,7 @@ import math
 import sys
 from pathlib import Path
 
+import pyarrow as pa
 import pyarrow.parquet as pq
 
 logger = logging.getLogger(__name__)
@@ -45,12 +46,11 @@ def reshard_one(
     row_group_size: int,
     compression: str,
 ) -> None:
-    pf = pq.ParquetFile(str(src))
     dst.parent.mkdir(parents=True, exist_ok=True)
     writer: pq.ParquetWriter | None = None
     try:
-        for rg_idx in range(pf.num_row_groups):
-            table = pf.read_row_group(rg_idx)
+        for batch in pq.ParquetFile(str(src)).iter_batches(batch_size=row_group_size):
+            table = pa.Table.from_batches([batch])
             if writer is None:
                 writer = pq.ParquetWriter(str(dst), table.schema, compression=compression)
             writer.write_table(table, row_group_size=row_group_size)

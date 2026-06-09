@@ -20,7 +20,7 @@ Example:
     --pt /path/to/cot_PaliGemma_ck_15000.pt \\
     --out /path/to/paligemma-3b-pt-224.npz \\
     --truncate_vocab 257152 \\
-    --dtype float16
+    --dtype float32
 
 Then verify in-repo loading::
 

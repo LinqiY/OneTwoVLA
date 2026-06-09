@@ -28,4 +28,6 @@ export LEROBOT_HOME=/inspire/hdd/global_user/gongjingjing-25039/sdzhang/dataset/
 # --create_train_val_split --val_ratio=0.05 \
 # --is_computing_norm_stats
 
-XLA_PYTHON_CLIENT_MEM_FRACTION=0.95 python scripts/train_cotrain.py pifast_vlabench_delta_cotrain_mm_and_eb --exp-name="2026.05.21/11.40.15/pifast-vlabench" --batch-size=$batch_size
+XLA_PYTHON_CLIENT_MEM_FRACTION=0.95 python scripts/train.py pifast_w_vlabench_delta_action_f \
+    --exp-name=${now_date}/${now_seconds}/pifast-vlabench --batch-size=$batch_size \
+    --save_interval=10000

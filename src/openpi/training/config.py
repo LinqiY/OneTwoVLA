@@ -1207,7 +1207,7 @@ _CONFIGS = [
                 ),
                 VLVQAParquetSource(
                     source_id="coco",
-                    path="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/dataset/vl_dataset/coco/data_rg256_jpeg448_leq512",
+                    path="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/dataset/vl_dataset/coco/data_rg256_jpeg448_leq512_rg256",
                     interleave_prob=0.15,
                     image_root="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/dataset/vl_dataset/coco/",
                 ),
@@ -1260,7 +1260,7 @@ _CONFIGS = [
                 ),
                 VLVQAParquetSource(
                     source_id="coco",
-                    path="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/dataset/vl_dataset/coco/data_rg256_jpeg448_leq512",
+                    path="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/dataset/vl_dataset/coco/data_rg256_jpeg448_leq512_rg256",
                     interleave_prob=0.05,
                     image_root="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/dataset/vl_dataset/coco/",
                 ),
@@ -1405,7 +1405,7 @@ _CONFIGS = [
                 ),
                 VLVQAParquetSource(
                     source_id="coco",
-                    path="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/dataset/vl_dataset/coco/data_rg256_jpeg448_leq512",
+                    path="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/dataset/vl_dataset/coco/data_rg256_jpeg448_leq512_rg256",
                     interleave_prob=0.15,
                     image_root="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/dataset/vl_dataset/coco/",
                 ),
@@ -1457,7 +1457,7 @@ _CONFIGS = [
                 ),
                 VLVQAParquetSource(
                     source_id="coco",
-                    path="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/dataset/vl_dataset/coco/data_rg256_jpeg448_leq512",
+                    path="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/dataset/vl_dataset/coco/data_rg256_jpeg448_leq512_rg256",
                     interleave_prob=0.05,
                     image_root="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/dataset/vl_dataset/coco/",
                 ),
@@ -1554,7 +1554,7 @@ _CONFIGS = [
                 ),
                 VLVQADatasetSource(
                     path="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/dataset/vl_dataset/vlabench_vqa_assets/primitive/jsons_train/goal_description",
-                    interleave_prob=0.14,
+                    interleave_prob=0.10,
                 ),
                 VLVQADatasetSource(
                     path="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/dataset/vl_dataset/vlabench_vqa_assets/primitive/jsons_train/spatial_understanding",
@@ -1566,7 +1566,7 @@ _CONFIGS = [
                 ),
                 VLVQADatasetSource(
                     path="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/dataset/vl_dataset/vlabench_vqa_assets/primitive/jsons_train/trajectory",
-                    interleave_prob=0.26,
+                    interleave_prob=0.30,
                 ),
             ),
             base_config=DataConfig(
@@ -1610,7 +1610,7 @@ _CONFIGS = [
                 ),
                 VLVQAParquetSource(
                     source_id="coco",
-                    path="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/dataset/vl_dataset/coco/data_rg256_jpeg448_leq512",
+                    path="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/dataset/vl_dataset/coco/data_rg256_jpeg448_leq512_rg256",
                     interleave_prob=0.15,
                     image_root="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/dataset/vl_dataset/coco/",
                 ),
@@ -1663,7 +1663,7 @@ _CONFIGS = [
                 ),
                 VLVQAParquetSource(
                     source_id="coco",
-                    path="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/dataset/vl_dataset/coco/data_rg256_jpeg448_leq512",
+                    path="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/dataset/vl_dataset/coco/data_rg256_jpeg448_leq512_rg256",
                     interleave_prob=0.05,
                     image_root="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/dataset/vl_dataset/coco/",
                 ),
@@ -1722,6 +1722,24 @@ _CONFIGS = [
             ),
         ),
         weight_loader=weight_loaders.PaliGemmaWeightLoader("/inspire/hdd/global_user/gongjingjing-25039/lqyin/models/paligemma-3b-pt-224-vlabench-2-jax/paligemma-3b-pt-224.npz"),
+        use_val_dataset=False,
+        # val_ratio=0.05,
+        num_train_steps=100_000,
+        batch_size=32,
+        num_workers=64,
+    ),
+
+    TrainConfig(
+        name="pifast_w_vlabench_delta_action_f",
+        model=pi0_fast.Pi0FASTConfig(action_dim=7, action_horizon=10, max_token_len=180, paligemma_variant="gemma_2b"),
+        data=AlignedLeRobotVLABenchDataConfig(
+            repo_id="vlabench/vlabench_pretrain_primitive",
+            base_config=DataConfig(
+                prompt_from_task=True,
+                local_files_only=True,
+            ),
+        ),
+        weight_loader=weight_loaders.PaliGemmaWeightLoader("/inspire/hdd/global_user/gongjingjing-25039/lqyin/models/paligemma-3b-pt-224-vlabench-jax-new/paligemma-3b-pt-224.npz"),
         use_val_dataset=False,
         # val_ratio=0.05,
         num_train_steps=100_000,
@@ -1811,7 +1829,7 @@ _CONFIGS = [
                 ),
                 VLVQAParquetSource(
                     source_id="coco",
-                    path="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/dataset/vl_dataset/coco/data_rg256_jpeg448_leq512",
+                    path="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/dataset/vl_dataset/coco/data_rg256_jpeg448_leq512_rg256",
                     interleave_prob=0.15,
                     image_root="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/dataset/vl_dataset/coco/",
                 ),
@@ -1864,7 +1882,7 @@ _CONFIGS = [
                 ),
                 VLVQAParquetSource(
                     source_id="coco",
-                    path="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/dataset/vl_dataset/coco/data_rg256_jpeg448_leq512",
+                    path="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/dataset/vl_dataset/coco/data_rg256_jpeg448_leq512_rg256",
                     interleave_prob=0.05,
                     image_root="/inspire/hdd/global_user/gongjingjing-25039/sdzhang/dataset/vl_dataset/coco/",
                 ),
@@ -2460,7 +2478,7 @@ _CONFIGS = [
         model=pi0_fast.Pi0FASTConfig(
             action_dim=7,
             action_horizon=10,
-            max_token_len=320,
+            max_token_len=512,
             paligemma_variant="gemma_2b",
         ),
         data=AlignedLeRobotVLABenchDataConfig(
